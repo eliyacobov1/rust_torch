@@ -1,0 +1,25 @@
+
+[package]
+name = "rustorch"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rustorch"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["python-bindings"]
+python-bindings = ["pyo3", "numpy"]
+
+[dependencies]
+rayon = "1.10"
+anyhow = "1"
+thiserror = "1"
+
+pyo3 = { version = "0.21", features = ["extension-module"], optional = true }
+numpy = { version = "0.21", optional = true }
+
+[[bin]]
+name = "rustorch_cli"
+path = "src/main.rs"

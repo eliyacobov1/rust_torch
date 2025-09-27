@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Python deps
+        run: |
+          python -m pip install -U pip wheel setuptools maturin numpy pytest
+      - name: Build rustorch (PyO3)
+        run: |
+          maturin develop --release
+      - name: Run tests
+        run: |
+          pytest -q

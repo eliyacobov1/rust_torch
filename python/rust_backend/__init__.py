@@ -1,0 +1,1 @@
+from .backend import rust_backend  # registers on import via decorator usage

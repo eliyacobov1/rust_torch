@@ -1,0 +1,15 @@
+/target
+/__pycache__/
+*.so
+*.pyd
+*.dll
+*.dylib
+*.egg-info
+/build
+/dist
+/.maturin
+.pytest_cache/
+*.o
+*.obj
+*.out
+**/.DS_Store
