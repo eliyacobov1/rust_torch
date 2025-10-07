@@ -2,22 +2,24 @@
 pub mod kernels;
 
 use std::sync::{Arc};
-use kernels::matmul_kernel;
+use kernels::{ matmul_kernel, add_kernel };
 use crate::tensor::Tensor;
 use crate::tensor::TensorInner;
 use crate::autograd::{make_add_grad, make_matmul_grad};
 
 pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
     assert_eq!(a.shape(), b.shape());
-    let n = a.numel();
-    let mut out_data = vec![0.0f32; n];
-    for i in 0..n 
-    {
-        out_data[i] = a.storage().data[i] + b.storage().data[i];
-    }
+    let shape = Tensor::broadcast_shape(a.shape(), b.shape());
+
+    // Materialize broadcasted views (copy version you already wrote)
+    let a_b = Tensor::broadcast_to(a, &shape);
+    let b_b = Tensor::broadcast_to(b, &shape);
+    let result_data = add_kernel(a_b.storage().data.as_slice(), b_b.storage().data.as_slice());
+
     let requires_grad = a.requires_grad() || b.requires_grad();
     let grad_fn = if requires_grad { Some(make_add_grad(a, b)) } else { None };
-    let out = Tensor::new(out_data, &a.shape(), grad_fn, requires_grad);
+    let out = Tensor::new(result_data, &a.shape(), grad_fn, requires_grad);
+
     out
 }
 

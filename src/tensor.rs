@@ -2,11 +2,10 @@
 use std::array;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
-use std::ops::{Index, IndexMut, Mul};
+use std::ops::{Index, IndexMut, Mul, Add};
 
 use crate::storage::Storage;
-use crate::autograd::{GradFn, Grad};
-use crate::ops::matmul;
+use crate::autograd::{GradFn, Grad, make_broadcast_grad, make_reshape_grad};
 
 pub type GradFnRef = Arc<dyn GradFn + Send + Sync>;
 
@@ -159,6 +158,94 @@ impl Tensor {
             .grad_fn = grad_fn;
     }
 
+    pub fn broadcast_to(&self, target_shape: &[usize]) -> Tensor {
+        // TODO: broadcast optimizations (no copy, etc)
+        let src_shape = self.shape();
+        assert!( target_shape.len() >= src_shape.len(), "Cannot broadcast to fewer dimensions" );
+
+        // Align dimensions (pad with 1s on the left)
+        let mut src_aligned = vec![1; target_shape.len()];
+        src_aligned[(target_shape.len() - src_shape.len())..].copy_from_slice(src_shape);
+
+        // Compute total element count
+        let out_len: usize = target_shape.iter().product();
+        let mut out_data = Vec::with_capacity(out_len);
+
+        // index broadcasting
+        fn broadcast_index(
+            src_data: &[f32],
+            src_shape: &[usize],
+            target_shape: &[usize],
+            out_data: &mut Vec<f32>,
+        ) {
+            // TODO: this function goes iterates over all elements in the broadcasted tensor, highly inefficient
+            let ndim = target_shape.len();
+            let mut idx = vec![0; ndim];
+
+            // Total number of elements in the broadcasted tensor
+            let total_elems: usize = target_shape.iter().product();
+
+            for linear_idx in 0..total_elems {
+                // Decode linear index into multi-dimensional indices
+                let mut rem = linear_idx;
+                for d in (0..ndim).rev() {
+                    idx[d] = rem % target_shape[d];
+                    rem /= target_shape[d];
+                }
+
+                // Map broadcasted coordinates to source coordinates
+                let mut src_idx = Vec::with_capacity(src_shape.len());
+                let offset = ndim - src_shape.len();
+                for i in 0..src_shape.len() {
+                    let src_dim = src_shape[i];
+                    let coord = idx[offset + i];
+                    src_idx.push(if src_dim == 1 { 0 } else { coord });
+                }
+
+                // Compute flat index into source tensor
+                let flat_src = flatten_index(&src_idx, src_shape);
+                out_data.push(src_data[flat_src]);
+            }
+        }
+
+        fn flatten_index(idxs: &[usize], shape: &[usize]) -> usize {
+            // TODO: this broadcast operation is not efficient in terms of memory, speed, branch prediction
+            let mut flat = 0;
+            let mut stride = 1;
+            for (&i, &dim) in idxs.iter().rev().zip(shape.iter().rev()) {
+                flat += i * stride;
+                stride *= dim;
+            }
+            flat
+        }
+
+        broadcast_index(&self.storage().data, &src_aligned, target_shape, &mut out_data);
+        let grad_fn = if self.requires_grad() {Some(make_broadcast_grad(self, target_shape))} else {None};
+
+        Self::new(out_data, target_shape, grad_fn, self.requires_grad())
+    }
+
+    pub fn reshape(&self, new_shape: &[usize]) -> Self {
+        let old_numel: usize = self.shape().iter().product();
+        let new_numel: usize = new_shape.iter().product();
+        assert_eq!(old_numel, new_numel, "Cannot reshape: number of elements must remain the same");
+
+        let grad_fn = if self.requires_grad() {
+            Some(make_reshape_grad(self, new_shape))
+        } else {
+            None
+        };
+
+        let inner = TensorInner {
+            storage: Storage { data: self.storage().data.clone() },
+            requires_grad: self.requires_grad(),
+            grad: self.inner.grad.as_ref().map(Arc::clone),
+            grad_fn,
+            shape: new_shape.to_vec(),
+        };
+        Tensor { inner: Arc::new(inner) }
+    }
+
     pub(crate) fn inner(&self) -> &Arc<TensorInner> {
         &self.inner
     }
@@ -178,6 +265,7 @@ impl Tensor {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct TensorInner {
     pub storage: Storage,
     pub requires_grad: bool,
@@ -426,6 +514,13 @@ impl TensorInner {
 impl Mul<&Tensor> for &Tensor {
     type Output = Tensor;
     fn mul(self, other: &Tensor) -> Self::Output {
-        matmul(self, other)
+        crate::ops::matmul(self, other)
+    }
+}
+
+impl Add<&Tensor> for &Tensor {
+    type Output = Tensor;
+    fn add(self, other: &Tensor) -> Self::Output {
+        crate::ops::add(self, other)
     }
 }

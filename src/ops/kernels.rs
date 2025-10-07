@@ -11,3 +11,13 @@ pub fn matmul_kernel(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<
     }
     out
 }
+
+pub fn add_kernel(a: &[f32], b: &[f32]) -> Vec<f32> {
+    assert_eq!(a.len(), b.len());
+    let n = a.len();
+    let mut out = vec![0.0f32; n];
+    for i in 0..n {
+        out[i] = a[i] + b[i];
+    }
+    out
+}

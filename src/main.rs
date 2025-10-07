@@ -1,5 +1,3 @@
-
-use std::sync::{Arc};
 use rustorch::{ops, autograd};
 use rustorch::tensor::Tensor;
 
