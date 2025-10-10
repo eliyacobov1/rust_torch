@@ -1,11 +1,10 @@
-
 pub mod kernels;
 
 use std::sync::{Arc};
 use kernels::{ matmul_kernel, add_kernel };
 use crate::tensor::Tensor;
 use crate::tensor::TensorInner;
-use crate::autograd::{make_add_grad, make_matmul_grad};
+use crate::autograd::{make_add_grad, make_matmul_grad, make_mse_loss_grad};
 
 pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
     assert_eq!(a.shape(), b.shape());
@@ -50,4 +49,28 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Tensor {
     }
 
     out
+}
+
+pub fn mse_loss(predictions: &Tensor, targets: &Tensor) -> Tensor {
+    // Mean Squared Error: (1/N) * sum((predictions - targets)^2)
+    assert_eq!(predictions.shape(), targets.shape(), "Predictions and targets must have the same shape");
+    
+    let requires_grad = predictions.requires_grad() || targets.requires_grad();
+    let n = predictions.numel() as f32;
+    
+    // Compute loss directly for efficiency
+    let mut loss = 0.0;
+    for (pred, target) in predictions.storage().data.iter().zip(targets.storage().data.iter()) {
+        let diff = pred - target;
+        loss += diff * diff;
+    }
+    loss /= n;
+    
+    let grad_fn = if requires_grad {
+        Some(make_mse_loss_grad(predictions, targets, n))
+    } else {
+        None
+    };
+    
+    Tensor::new(vec![loss], &[1], grad_fn, requires_grad)
 }

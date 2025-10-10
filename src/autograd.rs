@@ -1,4 +1,3 @@
-
 use crate::tensor::Tensor;
 use crate::tensor::GradFnRef;
 use std::sync::Arc;
@@ -58,14 +57,18 @@ pub fn make_add_grad(a:&Tensor, b:&Tensor)->GradFnRef{
     Arc::new(AddGrad{a: a.clone(), b: b.clone()})
 }
 
-pub fn backward(loss:&Tensor){
-    if let Some(g)=&loss.grad_lock() 
-    {
-         g.lock().unwrap().data[0]=1.0; 
+pub fn backward(loss: &Tensor) {
+    // Enforce that backward can only be called on scalar tensors
+    let shape = loss.shape();
+    if shape.len() > 2 || (shape.len() == 2 && shape != &[1, 1]) || (shape.len() == 1 && shape[0] != 1) {
+        panic!("backward can only be called on scalar tensors (shape [] or [1] or [1, 1]), got shape {:?}", shape);
     }
-    if let Some(gf)=&loss.grad_fn()
-    {
-         gf.backward(&[1.0]);
+
+    if let Some(g) = &loss.grad_lock() {
+        g.lock().unwrap().data[0] = 1.0;
+    }
+    if let Some(gf) = &loss.grad_fn() {
+        gf.backward(&[1.0]);
     }
 }
 
@@ -186,4 +189,37 @@ fn sum_to_shape(x: &Tensor, target_shape: &[usize]) -> Tensor {
     }
 
     Tensor::from_vec_f32(reduced, target_shape, None, false)
+}
+
+struct MseLossGrad { predictions: Tensor, targets: Tensor, n: f32 }
+impl GradFn for MseLossGrad {
+    fn backward(&self, grad_out: &[f32]) {
+        // For MSE = (1/n) * sum((pred - target)^2)
+        // grad_pred = (2/n) * (pred - target) * grad_out
+        // grad_target = -(2/n) * (pred - target) * grad_out
+        let grad_scale = 2.0 / self.n * grad_out[0];
+        
+        if let Some(g) = &self.predictions.grad_lock() {
+            for ((gi, &pred), &target) in g.lock().unwrap().data.iter_mut()
+                .zip(self.predictions.storage().data.iter())
+                .zip(self.targets.storage().data.iter()) {
+                *gi += grad_scale * (pred - target);
+            }
+        }
+        
+        if let Some(g) = &self.targets.grad_lock() {
+            for ((gi, &pred), &target) in g.lock().unwrap().data.iter_mut()
+                .zip(self.predictions.storage().data.iter())
+                .zip(self.targets.storage().data.iter()) {
+                *gi -= grad_scale * (pred - target);
+            }
+        }
+    }
+}
+pub fn make_mse_loss_grad(predictions: &Tensor, targets: &Tensor, n: f32) -> GradFnRef {
+    Arc::new(MseLossGrad { 
+        predictions: predictions.clone(), 
+        targets: targets.clone(),
+        n
+    })
 }
