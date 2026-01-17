@@ -1,4 +1,3 @@
-
 use std::array;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
@@ -221,7 +220,6 @@ impl Tensor {
 
         broadcast_index(&self.storage().data, &src_aligned, target_shape, &mut out_data);
         let grad_fn = if self.requires_grad() {Some(make_broadcast_grad(self, target_shape))} else {None};
-
         Self::new(out_data, target_shape, grad_fn, self.requires_grad())
     }
 
@@ -379,7 +377,8 @@ impl TensorInner {
                 requires_grad,
                 grad: if requires_grad {Some(Arc::new(Mutex::new(Grad::zeros_like_shape(&shape))))} else {None},
                 grad_fn,
-                shape: shape.to_vec() }
+                shape: shape.to_vec(),
+        }
     }
 
     pub fn from_vec_f32(v: Vec<f32>, shape: &[usize], grad_fn: Option<GradFnRef>, requires_grad: bool) -> Arc<Self> {
@@ -390,6 +389,9 @@ impl TensorInner {
     }
     pub fn ones(shape: &[usize], requires_grad: bool) -> Self {
         Self::full(shape, 1.0, requires_grad)
+    }
+    fn full(shape: &[usize], value: f32, requires_grad: bool) -> Self {
+        Self::new(vec![value; shape.iter().product()], shape, None, requires_grad)
     }
     pub fn numel(&self) -> usize { 
         self.shape.iter().product() 
@@ -410,9 +412,6 @@ impl TensorInner {
         out
     }
 
-    fn full(shape: &[usize], value: f32, requires_grad: bool) -> Self {
-        Self::new(vec![value; shape.iter().product()], shape, None, requires_grad)
-    }
     pub fn shape(&self) -> &[usize] { &self.shape }
 
     pub fn num_of_matrices(&self) -> usize {

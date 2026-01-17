@@ -74,3 +74,20 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor) -> Tensor {
     
     Tensor::new(vec![loss], &[1], grad_fn, requires_grad)
 }
+
+pub fn relu(x: &Tensor) -> Tensor {
+    let data: Vec<f32> = x.storage().data.iter().map(|&v| v.max(0.0)).collect();
+    // For autograd, you would add a ReLUGrad struct and grad_fn, but for now, just forward.
+    Tensor::new(data, x.shape(), None, x.requires_grad())
+}
+
+pub fn linear(x: &Tensor, w: &Tensor, b: &Tensor) -> Tensor {
+    // x: [batch, in_features], w: [in_features, out_features], b: [out_features]
+    let out = matmul(x, w);
+    let mut out_data = out.storage().data.clone();
+    let out_features = b.shape()[0];
+    for (i, val) in out_data.iter_mut().enumerate() {
+        *val += b.storage().data[i % out_features];
+    }
+    Tensor::new(out_data, out.shape(), None, x.requires_grad() || w.requires_grad() || b.requires_grad())
+}

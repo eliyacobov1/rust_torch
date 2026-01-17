@@ -1,6 +1,7 @@
 use crate::tensor::Tensor;
 use crate::tensor::GradFnRef;
 use std::sync::Arc;
+use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
 pub struct Grad { pub data: Vec<f32> }
@@ -9,7 +10,10 @@ impl Grad {
         Self { data: vec![0.0; shape.iter().product()] }
     }
 }
-pub trait GradFn { fn backward(&self, grad_out:&[f32]); }
+pub trait GradFn {
+    fn backward(&self, grad_out:&[f32]);
+    fn parents(&self) -> Vec<&Tensor> { vec![] }
+}
 
 struct MatMulGrad { a: Tensor, b: Tensor }
 impl GradFn for MatMulGrad {
@@ -28,6 +32,9 @@ impl GradFn for MatMulGrad {
             let mut grad_b_lock = grad_b.lock().unwrap();
             grad_b_lock.data = (&self.a.transpose() * &grad_out_tensor).storage().data;
         }
+    }
+    fn parents(&self) -> Vec<&Tensor> {
+        vec![&self.a, &self.b]
     }
 }
 pub fn make_matmul_grad(a:&Tensor, b:&Tensor)->GradFnRef{
@@ -52,23 +59,33 @@ impl GradFn for AddGrad {
             } 
         }
     }
+    fn parents(&self) -> Vec<&Tensor> {
+        vec![&self.a, &self.b]
+    }
 }
 pub fn make_add_grad(a:&Tensor, b:&Tensor)->GradFnRef{
     Arc::new(AddGrad{a: a.clone(), b: b.clone()})
 }
 
 pub fn backward(loss: &Tensor) {
-    // Enforce that backward can only be called on scalar tensors
-    let shape = loss.shape();
-    if shape.len() > 2 || (shape.len() == 2 && shape != &[1, 1]) || (shape.len() == 1 && shape[0] != 1) {
-        panic!("backward can only be called on scalar tensors (shape [] or [1] or [1, 1]), got shape {:?}", shape);
-    }
+    let mut visited = HashSet::new();
+    backward_recursive(loss, &mut visited);
+}
 
-    if let Some(g) = &loss.grad_lock() {
-        g.lock().unwrap().data[0] = 1.0;
+fn backward_recursive(tensor: &Tensor, visited: &mut HashSet<usize>) {
+    let id = tensor as *const _ as usize;
+    if !visited.insert(id) {
+        return; // already visited
     }
-    if let Some(gf) = &loss.grad_fn() {
-        gf.backward(&[1.0]);
+    // Only initialize grad for the starting tensor
+    if tensor.grad_lock().is_some() && visited.len() == 1 {
+        tensor.grad_lock().unwrap().lock().unwrap().data[0] = 1.0;
+    }
+    if let Some(gf) = &tensor.grad_fn() {
+        gf.backward(&tensor.grad().as_ref().unwrap().data);
+        for parent in gf.parents() {
+            backward_recursive(parent, visited);
+        }
     }
 }
 
@@ -90,6 +107,9 @@ impl GradFn for BroadcastBackward {
                 *gi += new_grad;
             }
         }
+    }
+    fn parents(&self) -> Vec<&Tensor> {
+        vec![&self.input]
     }
 }
 
@@ -121,6 +141,9 @@ impl GradFn for ReshapeBackward {
                 *gi += new_grad;
             }
         }
+    }
+    fn parents(&self) -> Vec<&Tensor> {
+        vec![&self.input]
     }
 }
 
@@ -214,6 +237,9 @@ impl GradFn for MseLossGrad {
                 *gi -= grad_scale * (pred - target);
             }
         }
+    }
+    fn parents(&self) -> Vec<&Tensor> {
+        vec![&self.predictions, &self.targets]
     }
 }
 pub fn make_mse_loss_grad(predictions: &Tensor, targets: &Tensor, n: f32) -> GradFnRef {
