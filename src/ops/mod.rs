@@ -1,10 +1,10 @@
 pub mod kernels;
 
 use std::sync::{Arc};
-use kernels::{ matmul_kernel, add_kernel };
+use kernels::{ matmul_kernel, add_kernel, mul_kernel };
 use crate::tensor::Tensor;
 use crate::tensor::TensorInner;
-use crate::autograd::{make_add_grad, make_matmul_grad, make_mse_loss_grad};
+use crate::autograd::{make_add_grad, make_matmul_grad, make_mse_loss_grad, make_mul_grad};
 
 pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
     assert_eq!(a.shape(), b.shape());
@@ -73,6 +73,16 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor) -> Tensor {
     };
     
     Tensor::new(vec![loss], &[1], grad_fn, requires_grad)
+}
+
+pub fn mul(a: &Tensor, b: &Tensor) -> Tensor {
+    assert_eq!(a.shape(), b.shape());
+
+    let result_data = mul_kernel(a.storage().data.as_slice(), b.storage().data.as_slice());
+
+    let requires_grad = a.requires_grad() || b.requires_grad();
+    let grad_fn = if requires_grad { Some(make_mul_grad(a, b)) } else { None };
+    Tensor::new(result_data, a.shape(), grad_fn, requires_grad)
 }
 
 pub fn relu(x: &Tensor) -> Tensor {

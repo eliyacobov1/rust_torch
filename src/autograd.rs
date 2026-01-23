@@ -67,6 +67,36 @@ pub fn make_add_grad(a:&Tensor, b:&Tensor)->GradFnRef{
     Arc::new(AddGrad{a: a.clone(), b: b.clone()})
 }
 
+struct MulGrad { a: Tensor, b: Tensor }
+impl GradFn for MulGrad {
+    fn backward(&self, grad_out:&[f32]) {
+        if let Some(g)=&self.a.grad_lock()
+        {
+            for ((gi, &u), &b_val) in g.lock().unwrap().data.iter_mut()
+                .zip(grad_out)
+                .zip(self.b.storage().data.iter())
+            {
+                *gi += u * b_val;
+            }
+        }
+        if let Some(g)=&self.b.grad_lock()
+        {
+            for ((gi, &u), &a_val) in g.lock().unwrap().data.iter_mut()
+                .zip(grad_out)
+                .zip(self.a.storage().data.iter())
+            {
+                *gi += u * a_val;
+            }
+        }
+    }
+    fn parents(&self) -> Vec<&Tensor> {
+        vec![&self.a, &self.b]
+    }
+}
+pub fn make_mul_grad(a:&Tensor, b:&Tensor)->GradFnRef{
+    Arc::new(MulGrad{a: a.clone(), b: b.clone()})
+}
+
 pub fn backward(loss: &Tensor) {
     let mut visited = HashSet::new();
     backward_recursive(loss, &mut visited);

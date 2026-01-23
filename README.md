@@ -10,6 +10,18 @@ cargo build --release
 maturin develop --release
 ```
 
+To build a distributable Python wheel:
+
+```bash
+maturin build --release
+```
+
+To run the Python bindings test:
+
+```bash
+pytest tests/test_tensor.py
+```
+
 ## Build Rust-only (no Python)
 
 ```bash

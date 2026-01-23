@@ -21,6 +21,34 @@ fn tensor_add_backward_propagates_upstream_gradient() {
 }
 
 #[test]
+fn tensor_mul_backward_matches_expected_gradients() {
+    let a = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0], &[2, 2], None, true);
+    let b = Tensor::from_vec_f32(vec![2.0, 3.0, 4.0, 5.0], &[2, 2], None, true);
+
+    let out = ops::mul(&a, &b);
+
+    let upstream = vec![0.1, 0.2, 0.3, 0.4];
+    out.grad_fn().expect("mul grad fn").backward(&upstream);
+
+    let grad_a = a.grad().expect("gradient for a");
+    let grad_b = b.grad().expect("gradient for b");
+
+    let expected_grad_a: Vec<f32> = upstream
+        .iter()
+        .zip(b.storage().data.iter())
+        .map(|(&u, &b_val)| u * b_val)
+        .collect();
+    let expected_grad_b: Vec<f32> = upstream
+        .iter()
+        .zip(a.storage().data.iter())
+        .map(|(&u, &a_val)| u * a_val)
+        .collect();
+
+    assert_approx_eq(&grad_a.data, expected_grad_a.as_slice(), 1e-6);
+    assert_approx_eq(&grad_b.data, expected_grad_b.as_slice(), 1e-6);
+}
+
+#[test]
 fn tensor_matmul_backward_matches_manual_gradient() {
     let a = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], None, true);
     let b = Tensor::from_vec_f32(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], &[3, 2], None, true);
