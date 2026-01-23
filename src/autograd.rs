@@ -41,51 +41,103 @@ pub fn make_matmul_grad(a:&Tensor, b:&Tensor)->GradFnRef{
     Arc::new(MatMulGrad { a: a.clone(), b: b.clone() })
 }
 
-struct AddGrad { a: Tensor, b: Tensor }
+struct AddGrad {
+    a: Tensor,
+    b: Tensor,
+    output_shape: Vec<usize>,
+}
 impl GradFn for AddGrad {
     fn backward(&self, grad_out:&[f32]) {
-        if let Some(g)=&self.a.grad_lock()
-        { 
-            for (gi,&u) in g.lock().unwrap().data.iter_mut().zip(grad_out)
-            {
-                *gi+=u;
-            } 
+        let expected_len: usize = self.output_shape.iter().product();
+        assert_eq!(
+            grad_out.len(),
+            expected_len,
+            "add backward: grad_out len {} != output len {}",
+            grad_out.len(),
+            expected_len
+        );
+        let grad_out_tensor = Tensor::from_vec_f32(grad_out.to_vec(), &self.output_shape, None, false);
+
+        if let Some(g)=&self.a.grad_lock() {
+            let grad_input = if self.a.shape() == self.output_shape.as_slice() {
+                grad_out_tensor.clone()
+            } else {
+                sum_to_shape(&grad_out_tensor, self.a.shape())
+            };
+            for (gi, &u) in g.lock().unwrap().data.iter_mut().zip(grad_input.storage().data.iter()) {
+                *gi += u;
+            }
         }
-        if let Some(g)=&self.b.grad_lock() 
-        { 
-            for (gi,&u) in g.lock().unwrap().data.iter_mut().zip(grad_out)
-            {
-                *gi+=u;
-            } 
+        if let Some(g)=&self.b.grad_lock() {
+            let grad_input = if self.b.shape() == self.output_shape.as_slice() {
+                grad_out_tensor.clone()
+            } else {
+                sum_to_shape(&grad_out_tensor, self.b.shape())
+            };
+            for (gi, &u) in g.lock().unwrap().data.iter_mut().zip(grad_input.storage().data.iter()) {
+                *gi += u;
+            }
         }
     }
     fn parents(&self) -> Vec<&Tensor> {
         vec![&self.a, &self.b]
     }
 }
-pub fn make_add_grad(a:&Tensor, b:&Tensor)->GradFnRef{
-    Arc::new(AddGrad{a: a.clone(), b: b.clone()})
+pub fn make_add_grad(a:&Tensor, b:&Tensor, output_shape: &[usize])->GradFnRef{
+    Arc::new(AddGrad{
+        a: a.clone(),
+        b: b.clone(),
+        output_shape: output_shape.to_vec(),
+    })
 }
 
-struct MulGrad { a: Tensor, b: Tensor }
+struct MulGrad {
+    a: Tensor,
+    b: Tensor,
+    output_shape: Vec<usize>,
+}
 impl GradFn for MulGrad {
     fn backward(&self, grad_out:&[f32]) {
-        if let Some(g)=&self.a.grad_lock()
-        {
-            for ((gi, &u), &b_val) in g.lock().unwrap().data.iter_mut()
-                .zip(grad_out)
-                .zip(self.b.storage().data.iter())
-            {
-                *gi += u * b_val;
+        let expected_len: usize = self.output_shape.iter().product();
+        assert_eq!(
+            grad_out.len(),
+            expected_len,
+            "mul backward: grad_out len {} != output len {}",
+            grad_out.len(),
+            expected_len
+        );
+
+        let a_b = Tensor::broadcast_to(&self.a, &self.output_shape);
+        let b_b = Tensor::broadcast_to(&self.b, &self.output_shape);
+
+        if let Some(g)=&self.a.grad_lock() {
+            let grad_full: Vec<f32> = grad_out.iter()
+                .zip(b_b.storage().data.iter())
+                .map(|(&u, &b_val)| u * b_val)
+                .collect();
+            let grad_full_tensor = Tensor::from_vec_f32(grad_full, &self.output_shape, None, false);
+            let grad_input = if self.a.shape() == self.output_shape.as_slice() {
+                grad_full_tensor
+            } else {
+                sum_to_shape(&grad_full_tensor, self.a.shape())
+            };
+            for (gi, &u) in g.lock().unwrap().data.iter_mut().zip(grad_input.storage().data.iter()) {
+                *gi += u;
             }
         }
-        if let Some(g)=&self.b.grad_lock()
-        {
-            for ((gi, &u), &a_val) in g.lock().unwrap().data.iter_mut()
-                .zip(grad_out)
-                .zip(self.a.storage().data.iter())
-            {
-                *gi += u * a_val;
+        if let Some(g)=&self.b.grad_lock() {
+            let grad_full: Vec<f32> = grad_out.iter()
+                .zip(a_b.storage().data.iter())
+                .map(|(&u, &a_val)| u * a_val)
+                .collect();
+            let grad_full_tensor = Tensor::from_vec_f32(grad_full, &self.output_shape, None, false);
+            let grad_input = if self.b.shape() == self.output_shape.as_slice() {
+                grad_full_tensor
+            } else {
+                sum_to_shape(&grad_full_tensor, self.b.shape())
+            };
+            for (gi, &u) in g.lock().unwrap().data.iter_mut().zip(grad_input.storage().data.iter()) {
+                *gi += u;
             }
         }
     }
@@ -93,8 +145,12 @@ impl GradFn for MulGrad {
         vec![&self.a, &self.b]
     }
 }
-pub fn make_mul_grad(a:&Tensor, b:&Tensor)->GradFnRef{
-    Arc::new(MulGrad{a: a.clone(), b: b.clone()})
+pub fn make_mul_grad(a:&Tensor, b:&Tensor, output_shape: &[usize])->GradFnRef{
+    Arc::new(MulGrad{
+        a: a.clone(),
+        b: b.clone(),
+        output_shape: output_shape.to_vec(),
+    })
 }
 
 pub fn backward(loss: &Tensor) {

@@ -49,6 +49,28 @@ fn tensor_mul_backward_matches_expected_gradients() {
 }
 
 #[test]
+fn tensor_mul_backward_reduces_broadcasted_grad() {
+    let a = Tensor::from_vec_f32(vec![2.0, 3.0], &[2, 1], None, true);
+    let b = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], None, true);
+
+    let out = ops::mul(&a, &b);
+
+    let upstream = vec![1.0; 6];
+    out.grad_fn().expect("mul grad fn").backward(&upstream);
+
+    let grad_a = a.grad().expect("gradient for a");
+    let grad_b = b.grad().expect("gradient for b");
+
+    // grad_a sums over the broadcasted axis: sum(b) per row
+    let expected_grad_a = vec![1.0 + 2.0 + 3.0, 4.0 + 5.0 + 6.0];
+    // grad_b equals upstream * a broadcasted
+    let expected_grad_b = vec![2.0, 2.0, 2.0, 3.0, 3.0, 3.0];
+
+    assert_approx_eq(&grad_a.data, expected_grad_a.as_slice(), 1e-6);
+    assert_approx_eq(&grad_b.data, expected_grad_b.as_slice(), 1e-6);
+}
+
+#[test]
 fn tensor_matmul_backward_matches_manual_gradient() {
     let a = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], None, true);
     let b = Tensor::from_vec_f32(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], &[3, 2], None, true);

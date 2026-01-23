@@ -7,7 +7,6 @@ use crate::tensor::TensorInner;
 use crate::autograd::{make_add_grad, make_matmul_grad, make_mse_loss_grad, make_mul_grad};
 
 pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
-    assert_eq!(a.shape(), b.shape());
     let shape = Tensor::broadcast_shape(a.shape(), b.shape());
 
     // Materialize broadcasted views (copy version you already wrote)
@@ -16,8 +15,8 @@ pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
     let result_data = add_kernel(a_b.storage().data.as_slice(), b_b.storage().data.as_slice());
 
     let requires_grad = a.requires_grad() || b.requires_grad();
-    let grad_fn = if requires_grad { Some(make_add_grad(a, b)) } else { None };
-    let out = Tensor::new(result_data, &a.shape(), grad_fn, requires_grad);
+    let grad_fn = if requires_grad { Some(make_add_grad(a, b, &shape)) } else { None };
+    let out = Tensor::new(result_data, &shape, grad_fn, requires_grad);
 
     out
 }
@@ -76,13 +75,15 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor) -> Tensor {
 }
 
 pub fn mul(a: &Tensor, b: &Tensor) -> Tensor {
-    assert_eq!(a.shape(), b.shape());
+    let shape = Tensor::broadcast_shape(a.shape(), b.shape());
 
-    let result_data = mul_kernel(a.storage().data.as_slice(), b.storage().data.as_slice());
+    let a_b = Tensor::broadcast_to(a, &shape);
+    let b_b = Tensor::broadcast_to(b, &shape);
+    let result_data = mul_kernel(a_b.storage().data.as_slice(), b_b.storage().data.as_slice());
 
     let requires_grad = a.requires_grad() || b.requires_grad();
-    let grad_fn = if requires_grad { Some(make_mul_grad(a, b)) } else { None };
-    Tensor::new(result_data, a.shape(), grad_fn, requires_grad)
+    let grad_fn = if requires_grad { Some(make_mul_grad(a, b, &shape)) } else { None };
+    Tensor::new(result_data, &shape, grad_fn, requires_grad)
 }
 
 pub fn relu(x: &Tensor) -> Tensor {
