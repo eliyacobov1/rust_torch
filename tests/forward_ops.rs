@@ -15,6 +15,16 @@ fn tensor_add_forward_matches_expected() {
 }
 
 #[test]
+fn tensor_mul_forward_matches_expected() {
+    let a = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0], &[2, 2], None, false);
+    let b = Tensor::from_vec_f32(vec![2.0, 3.0, 4.0, 5.0], &[2, 2], None, false);
+
+    let out = ops::mul(&a, &b);
+    assert_eq!(out.shape(), &[2, 2]);
+    assert_approx_eq(out.storage().data.as_slice(), &[2.0, 6.0, 12.0, 20.0], 1e-6);
+}
+
+#[test]
 fn tensor_matmul_forward_matches_manual_result() {
     let a = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], None, false);
     let b = Tensor::from_vec_f32(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], &[3, 2], None, false);

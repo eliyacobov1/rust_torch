@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["python-bindings"]
-python-bindings = ["pyo3", "numpy"]
+python-bindings = ["pyo3", "numpy", "ndarray"]
 
 [dependencies]
 rayon = "1.10"
@@ -19,6 +19,7 @@ thiserror = "1"
 
 pyo3 = { version = "0.21", features = ["extension-module"], optional = true }
 numpy = { version = "0.21", optional = true }
+ndarray = { version = "0.15", optional = true }
 
 [[bin]]
 name = "rustorch_cli"
