@@ -31,6 +31,11 @@
 - Name tests descriptively and keep them grouped by operation/feature area.
 - Keep new backend tests aligned with milestones in `docs/torch_integration_plan.md`.
 
+## Intermediate Development Task (Codex Cloud)
+- Add an intermediate milestone: set up a PyTorch NN that uses `rustorch` as the backend and performs MNIST classification with minimal loss.
+- This task is intended to run in the Codex cloud environment so MNIST can be fetched there (no local dataset downloads).
+- Update this section as progress is made or if gaps are discovered that block this task.
+
 ## Commit & Pull Request Guidelines
 - Commit messages in history are short, imperative, and specific (e.g., “Implement MSE loss”).
 - PRs should include: a concise summary, key changes, and how tests were run.
