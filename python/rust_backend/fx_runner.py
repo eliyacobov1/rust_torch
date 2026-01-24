@@ -6,6 +6,7 @@ import operator
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.fx import GraphModule
 
 import rustorch
@@ -19,7 +20,11 @@ _SUPPORTED_FUNCTIONS = {
     operator.matmul,
     torch.relu,
     torch.nn.functional.relu,
+    F.linear,
 }
+
+if hasattr(torch, "_C") and hasattr(torch._C, "_nn") and hasattr(torch._C._nn, "linear"):
+    _SUPPORTED_FUNCTIONS.add(torch._C._nn.linear)
 
 _SUPPORTED_METHODS = {
     "relu",
@@ -80,6 +85,17 @@ def _run_graph(gm: GraphModule, *inputs: torch.Tensor) -> torch.Tensor:
             elif node.target in (torch.relu, torch.nn.functional.relu):
                 value = _to_pytensor(args[0])
                 env[node.name] = value.relu()
+            elif node.target in (F.linear, getattr(torch._C._nn, "linear", None)):
+                inp = _to_pytensor(args[0])
+                weight = args[1]
+                if isinstance(weight, torch.Tensor):
+                    weight = weight.t()
+                weight = _to_pytensor(weight)
+                out = inp.matmul(weight)
+                if len(args) > 2 and args[2] is not None:
+                    bias = _to_pytensor(args[2])
+                    out = out.add(bias)
+                env[node.name] = out
             else:
                 raise RuntimeError(f"Unhandled call_function: {node.target}")
         elif node.op == "call_method":
@@ -119,11 +135,16 @@ def _run_graph(gm: GraphModule, *inputs: torch.Tensor) -> torch.Tensor:
 
 
 def run_fx(gm: GraphModule, example_inputs: list[torch.Tensor]) -> Callable:
+    warned = False
+
     def compiled(*inputs: torch.Tensor) -> torch.Tensor:
+        nonlocal warned
         try:
             return _run_graph(gm, *inputs)
         except Exception as exc:  # pragma: no cover - diagnostic fallback
-            _LOG.warning("rustorch FX runner fallback to eager: %s", exc)
+            if not warned:
+                _LOG.warning("rustorch FX runner fallback to eager: %s", exc)
+                warned = True
             return gm(*inputs)
 
     return compiled

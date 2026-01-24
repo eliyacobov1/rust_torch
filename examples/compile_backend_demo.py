@@ -1,5 +1,14 @@
+import sys
+from pathlib import Path
+
 import torch
-import python.rust_backend.backend as _  # register backend
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PYTHON_SRC = REPO_ROOT / "python"
+if str(PYTHON_SRC) not in sys.path:
+    sys.path.insert(0, str(PYTHON_SRC))
+
+import rust_backend.backend as _  # register backend
 import rustorch
 
 @torch.compile(backend="rust_backend")
