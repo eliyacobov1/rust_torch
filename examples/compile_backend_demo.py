@@ -11,13 +11,15 @@ if str(PYTHON_SRC) not in sys.path:
 import rust_backend.backend as _  # register backend
 import rustorch
 
-@torch.compile(backend="rust_backend")
 def toy(x, y):
-    # For now this runs as-is (no-op compile). Extend run_fx in Rust to intercept ops.
     return (x @ y).relu()
 
 if __name__ == "__main__":
+    compiled_toy = torch.compile(toy, backend="rust_backend")
     x = torch.randn(16, 32)
     y = torch.randn(32, 8)
-    out = toy(x, y)
-    print("OK, out:", tuple(out.shape))
+    eager_out = toy(x, y)
+    compiled_out = compiled_toy(x, y)
+    torch.testing.assert_close(compiled_out, eager_out)
+    print("OK, eager out:", tuple(eager_out.shape))
+    print("OK, compiled out:", tuple(compiled_out.shape))
