@@ -104,35 +104,46 @@ def _download_and_prepare_mnist(data_root: Path) -> None:
         torch.save((test_data, test_labels), test_file)
 
 
-class MnistMLP(nn.Module):
+class MnistCNN(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(28 * 28, 128),
+            nn.Conv2d(1, 8, kernel_size=3, stride=1, padding=0),
             nn.ReLU(),
-            nn.Linear(128, 10),
+            nn.Flatten(),
+            nn.Linear(8 * 26 * 26, 64),
+            nn.ReLU(),
+            nn.Linear(64, 10),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
 
+class MnistTrainer(nn.Module):
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self.model = model
+        self.criterion = nn.CrossEntropyLoss()
+
+    def forward(self, data: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        output = self.model(data)
+        return self.criterion(output, target)
+
+
 def train_epoch(
-    model: nn.Module,
+    trainer: nn.Module,
     optimizer: torch.optim.Optimizer,
     data_loader: DataLoader,
     device: torch.device,
 ) -> float:
-    model.train()
+    trainer.train()
     total_loss = 0.0
-    criterion = nn.CrossEntropyLoss()
     for data, target in data_loader:
         data = data.to(device)
         target = target.to(device)
         optimizer.zero_grad(set_to_none=True)
-        output = model(data)
-        loss = criterion(output, target)
+        loss = trainer(data, target)
         loss.backward()
         optimizer.step()
         total_loss += loss.item() * data.size(0)
@@ -169,16 +180,17 @@ def main() -> None:
 
     train_loader, test_loader = _build_dataloaders(DEFAULT_DATA_ROOT, batch_size)
 
-    model = MnistMLP().to(device)
-    compiled_model = torch.compile(model, backend="rust_backend")
-    optimizer = torch.optim.Adam(compiled_model.parameters(), lr=lr)
+    model = MnistCNN().to(device)
+    trainer = MnistTrainer(model).to(device)
+    compiled_trainer = torch.compile(trainer, backend="rust_backend")
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     for epoch in range(1, epochs + 1):
-        loss = train_epoch(compiled_model, optimizer, train_loader, device)
-        accuracy = evaluate(compiled_model, test_loader, device)
+        loss = train_epoch(compiled_trainer, optimizer, train_loader, device)
+        accuracy = evaluate(model, test_loader, device)
         print(f"Epoch {epoch}/{epochs} - loss: {loss:.4f} - accuracy: {accuracy:.4f}", flush=True)
 
-    accuracy = evaluate(compiled_model, test_loader, device)
+    accuracy = evaluate(model, test_loader, device)
     print(f"Final accuracy: {accuracy:.4f}", flush=True)
 
 

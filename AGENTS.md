@@ -35,7 +35,11 @@
 - Add an intermediate milestone: set up a PyTorch NN that uses `rustorch` as the backend and performs MNIST classification with minimal loss.
 - This task is intended to run in the Codex cloud environment so MNIST can be fetched there (no local dataset downloads).
 - When implementing the MNIST training script, gate dataset downloads behind a cloud-only signal (e.g., require an environment variable like `CODEX_CLOUD=1` or a `CLOUD_MNIST_OK=1` flag). If the flag is missing, the script should exit with a clear message instead of downloading.
-- Update this section as progress is made or if gaps are discovered that block this task.
+- Status:
+  - Implemented in `examples/mnist_rustorch_demo.py` with download gating via
+    `CLOUD_MNIST_OK=1`, `CODEX_CLOUD=1`, or `MNIST_ALLOW_DOWNLOAD=1`.
+  - Training loop uses a CNN compiled with `torch.compile(backend="rust_backend")`
+    and includes conv2d + cross-entropy loss.
 
 ## Commit & Pull Request Guidelines
 - Commit messages in history are short, imperative, and specific (e.g., “Implement MSE loss”).

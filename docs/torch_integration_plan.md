@@ -16,6 +16,11 @@ associated test/demo coverage.
 - Add an end-to-end MNIST demo that trains via `torch.compile` and evaluates accuracy.
 - Demo should gate dataset downloads behind a cloud-only flag and store data
   persistently in the environment.
+- Status:
+  - Implemented in `examples/mnist_rustorch_demo.py` with download gating via
+    `CLOUD_MNIST_OK=1`, `CODEX_CLOUD=1`, or `MNIST_ALLOW_DOWNLOAD=1`.
+  - Training loop uses a CNN (conv2d + linear + relu + cross-entropy loss) compiled
+    with `torch.compile(backend="rust_backend")`.
 
 ## M3: Autograd coverage
 - Ensure backward ops used by the MNIST demo are routed through the backend.
