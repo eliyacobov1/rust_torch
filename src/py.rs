@@ -52,6 +52,16 @@ impl PyTensor {
         }
     }
 
+    fn reshape(&self, shape: Vec<usize>) -> PyTensor {
+        PyTensor {
+            inner: self.inner.reshape(&shape),
+        }
+    }
+
+    fn shape(&self) -> Vec<usize> {
+        self.inner.shape().to_vec()
+    }
+
     fn numpy<'py>(&self, py: Python<'py>) -> PyResult<&'py PyArrayDyn<f32>> {
         let array = ArrayD::from_shape_vec(
             self.inner.shape().to_vec(),
