@@ -19,7 +19,11 @@ if str(PYTHON_SRC) not in sys.path:
 import rust_backend.backend as _  # noqa: F401 - register backend
 
 DEFAULT_DATA_ROOT = Path(os.environ.get("RUSTORCH_MNIST_ROOT", "~/.cache/rustorch/mnist")).expanduser()
-DOWNLOAD_FLAG = os.environ.get("CLOUD_MNIST_OK") == "1" or os.environ.get("CODEX_CLOUD") == "1"
+DOWNLOAD_FLAG = (
+    os.environ.get("CLOUD_MNIST_OK") == "1"
+    or os.environ.get("CODEX_CLOUD") == "1"
+    or os.environ.get("MNIST_ALLOW_DOWNLOAD") == "1"
+)
 MNIST_MIRROR = "https://storage.googleapis.com/cvdf-datasets/mnist/"
 MNIST_FILES = {
     "train-images-idx3-ubyte.gz": "f68b3c2dcbeaaa9fbdd348bbdeb94873",
@@ -56,8 +60,14 @@ def _build_dataloaders(data_root: Path, batch_size: int) -> Tuple[DataLoader, Da
         download=DOWNLOAD_FLAG,
         transform=transform,
     )
-    train_limit = int(os.environ.get("MNIST_TRAIN_LIMIT", "0"))
-    test_limit = int(os.environ.get("MNIST_TEST_LIMIT", "0"))
+    train_limit_env = os.environ.get("MNIST_TRAIN_LIMIT")
+    test_limit_env = os.environ.get("MNIST_TEST_LIMIT")
+    if train_limit_env is None and test_limit_env is None and not DOWNLOAD_FLAG:
+        train_limit = 10_000
+        test_limit = 2_000
+    else:
+        train_limit = int(train_limit_env or "0")
+        test_limit = int(test_limit_env or "0")
     if train_limit > 0:
         train_dataset = torch.utils.data.Subset(train_dataset, range(train_limit))
     if test_limit > 0:
@@ -94,28 +104,18 @@ def _download_and_prepare_mnist(data_root: Path) -> None:
         torch.save((test_data, test_labels), test_file)
 
 
-class MnistNet(nn.Module):
+class MnistMLP(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-        )
-        self.classifier = nn.Sequential(
+        self.net = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(64 * 7 * 7, 128),
+            nn.Linear(28 * 28, 128),
             nn.ReLU(),
-            nn.Dropout(0.25),
             nn.Linear(128, 10),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
-        return self.classifier(x)
+        return self.net(x)
 
 
 def train_epoch(
@@ -156,7 +156,8 @@ def main() -> None:
     if not DOWNLOAD_FLAG and not _mnist_exists(DEFAULT_DATA_ROOT):
         print(
             "MNIST dataset not found. Set CLOUD_MNIST_OK=1 (or CODEX_CLOUD=1) "
-            "to allow download in the cloud environment.",
+            "to allow download in the cloud environment, or set MNIST_ALLOW_DOWNLOAD=1 "
+            "to download locally.",
             flush=True,
         )
         sys.exit(1)
@@ -168,7 +169,7 @@ def main() -> None:
 
     train_loader, test_loader = _build_dataloaders(DEFAULT_DATA_ROOT, batch_size)
 
-    model = MnistNet().to(device)
+    model = MnistMLP().to(device)
     compiled_model = torch.compile(model, backend="rust_backend")
     optimizer = torch.optim.Adam(compiled_model.parameters(), lr=lr)
 
