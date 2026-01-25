@@ -35,6 +35,10 @@ _SUPPORTED_FUNCTIONS = {
     torch.ops.aten.threshold_backward.default,
     torch.ops.aten.sym_size.int,
     torch.ops.aten.nll_loss_forward.default,
+    torch.ops.aten.nll_loss_backward.default,
+    torch.ops.aten.convolution_backward.default,
+    torch.ops.aten.log_softmax_backward_data.default,
+    torch.ops.aten._log_softmax_backward_data.default,
     F.cross_entropy,
     F.linear,
 }
@@ -92,6 +96,16 @@ def _to_torch_tree(value: Any) -> Any:
         converted = [_to_torch_tree(item) for item in value]
         return type(value)(converted)
     return _to_torch(value)
+
+def _to_torch_arg(value: Any) -> Any:
+    if isinstance(value, (list, tuple)):
+        converted = [_to_torch_arg(item) for item in value]
+        return type(value)(converted)
+    if isinstance(value, dict):
+        return {key: _to_torch_arg(val) for key, val in value.items()}
+    if _is_torch_tensor(value) or isinstance(value, rustorch.PyTensor):
+        return _to_torch(value)
+    return value
 
 
 def _normalize_dim(dim: int, rank: int) -> int:
@@ -386,6 +400,18 @@ def _run_graph(gm: GraphModule, *inputs: torch.Tensor) -> torch.Tensor:
                     loss = loss.unsqueeze(0)
                 total_weight = weight.sum() if weight is not None else torch.tensor(target_t.numel(), device=target_t.device)
                 env[node.name] = (loss, total_weight)
+            elif node.target is torch.ops.aten.nll_loss_backward.default:
+                converted_args = tuple(_to_torch_arg(arg) for arg in args)
+                env[node.name] = torch.ops.aten.nll_loss_backward.default(*converted_args)
+            elif node.target is torch.ops.aten.convolution_backward.default:
+                converted_args = tuple(_to_torch_arg(arg) for arg in args)
+                env[node.name] = torch.ops.aten.convolution_backward.default(*converted_args)
+            elif node.target in (
+                torch.ops.aten.log_softmax_backward_data.default,
+                torch.ops.aten._log_softmax_backward_data.default,
+            ):
+                converted_args = tuple(_to_torch_arg(arg) for arg in args)
+                env[node.name] = node.target(*converted_args)
             else:
                 raise RuntimeError(f"Unhandled call_function: {node.target}")
         elif node.op == "call_method":
