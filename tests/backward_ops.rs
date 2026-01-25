@@ -1,6 +1,6 @@
 mod common;
 
-use rustorch::{ops, tensor::Tensor};
+use rustorch::{autograd, ops, tensor::Tensor};
 
 use common::{assert_approx_eq, matmul, transpose};
 
@@ -155,4 +155,65 @@ fn mse_loss_backward_matches_expected_derivative() {
 
     assert_approx_eq(&grad_predictions.data, expected_grad.as_slice(), 1e-6);
     assert_approx_eq(&grad_targets.data, expected_target_grad.as_slice(), 1e-6);
+}
+
+#[test]
+fn relu_backward_masks_negative_inputs() {
+    let x = Tensor::from_vec_f32(vec![-1.0, 0.0, 2.0, -3.0], &[2, 2], None, true);
+    let out = ops::relu(&x);
+
+    let upstream = vec![1.0, 2.0, 3.0, 4.0];
+    out.grad_fn().expect("relu grad fn").backward(&upstream);
+
+    let grad_x = x.grad().expect("gradient for x");
+    assert_approx_eq(&grad_x.data, &[0.0, 0.0, 3.0, 0.0], 1e-6);
+}
+
+#[test]
+fn linear_backward_propagates_to_weights_and_bias() {
+    let x = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], None, true);
+    let w = Tensor::from_vec_f32(vec![0.5, -1.0, 1.5, 2.0, -0.5, 0.25], &[3, 2], None, true);
+    let b = Tensor::from_vec_f32(vec![0.1, -0.2], &[2], None, true);
+
+    let out = ops::linear(&x, &w, &b);
+    let targets = Tensor::from_vec_f32(vec![0.0, 1.0, -1.0, 2.0], &[2, 2], None, false);
+    let loss = ops::mse_loss(&out, &targets);
+    autograd::backward(&loss);
+
+    let grad_out: Vec<f32> = out
+        .storage()
+        .data
+        .iter()
+        .zip(targets.storage().data.iter())
+        .map(|(pred, target)| {
+            let diff = pred - target;
+            (2.0 / 4.0) * diff
+        })
+        .collect();
+
+    let grad_x_expected = matmul(
+        &grad_out,
+        2,
+        2,
+        &transpose(w.storage().data.as_slice(), 3, 2),
+        2,
+        3,
+    );
+    let grad_w_expected = matmul(
+        &transpose(x.storage().data.as_slice(), 2, 3),
+        3,
+        2,
+        &grad_out,
+        2,
+        2,
+    );
+    let grad_b_expected = vec![grad_out[0] + grad_out[2], grad_out[1] + grad_out[3]];
+
+    let grad_x = x.grad().expect("gradient for x");
+    let grad_w = w.grad().expect("gradient for w");
+    let grad_b = b.grad().expect("gradient for b");
+
+    assert_approx_eq(&grad_x.data, grad_x_expected.as_slice(), 1e-6);
+    assert_approx_eq(&grad_w.data, grad_w_expected.as_slice(), 1e-6);
+    assert_approx_eq(&grad_b.data, grad_b_expected.as_slice(), 1e-6);
 }

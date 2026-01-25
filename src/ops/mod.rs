@@ -4,7 +4,13 @@ use std::sync::{Arc};
 use kernels::{ matmul_kernel, add_kernel, mul_kernel };
 use crate::tensor::Tensor;
 use crate::tensor::TensorInner;
-use crate::autograd::{make_add_grad, make_matmul_grad, make_mse_loss_grad, make_mul_grad};
+use crate::autograd::{
+    make_add_grad,
+    make_matmul_grad,
+    make_mse_loss_grad,
+    make_mul_grad,
+    make_relu_grad,
+};
 
 pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
     let shape = Tensor::broadcast_shape(a.shape(), b.shape());
@@ -88,17 +94,13 @@ pub fn mul(a: &Tensor, b: &Tensor) -> Tensor {
 
 pub fn relu(x: &Tensor) -> Tensor {
     let data: Vec<f32> = x.storage().data.iter().map(|&v| v.max(0.0)).collect();
-    // For autograd, you would add a ReLUGrad struct and grad_fn, but for now, just forward.
-    Tensor::new(data, x.shape(), None, x.requires_grad())
+    let requires_grad = x.requires_grad();
+    let grad_fn = if requires_grad { Some(make_relu_grad(x)) } else { None };
+    Tensor::new(data, x.shape(), grad_fn, requires_grad)
 }
 
 pub fn linear(x: &Tensor, w: &Tensor, b: &Tensor) -> Tensor {
     // x: [batch, in_features], w: [in_features, out_features], b: [out_features]
     let out = matmul(x, w);
-    let mut out_data = out.storage().data.clone();
-    let out_features = b.shape()[0];
-    for (i, val) in out_data.iter_mut().enumerate() {
-        *val += b.storage().data[i % out_features];
-    }
-    Tensor::new(out_data, out.shape(), None, x.requires_grad() || w.requires_grad() || b.requires_grad())
+    add(&out, b)
 }
