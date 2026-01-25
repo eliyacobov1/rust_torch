@@ -217,3 +217,14 @@ fn linear_backward_propagates_to_weights_and_bias() {
     assert_approx_eq(&grad_w.data, grad_w_expected.as_slice(), 1e-6);
     assert_approx_eq(&grad_b.data, grad_b_expected.as_slice(), 1e-6);
 }
+
+#[test]
+fn sum_backward_propagates_scalar_gradient() {
+    let x = Tensor::from_vec_f32(vec![1.0, -2.0, 3.0, 4.0], &[2, 2], None, true);
+    let out = ops::sum(&x);
+
+    out.grad_fn().expect("sum grad fn").backward(&[0.5]);
+
+    let grad_x = x.grad().expect("gradient for x");
+    assert_approx_eq(&grad_x.data, &[0.5, 0.5, 0.5, 0.5], 1e-6);
+}

@@ -16,7 +16,7 @@ fn main() {
     let h1_relu = ops::relu(&h1);       // [2, 3]
     let logits = ops::linear(&h1_relu, &w2, &b2); // [2, 1]
     // For simplicity, sum the logits to get a single scalar output (like reduction)
-    let output = Tensor::from_vec_f32(vec![logits.storage().data.iter().sum()], &[1], None, true);
+    let output = ops::sum(&logits);
 
     // Target: single scalar
     let target = Tensor::from_vec_f32(vec![1.0], &[1], None, false);
