@@ -10,6 +10,7 @@ use crate::autograd::{
     make_mse_loss_grad,
     make_mul_grad,
     make_relu_grad,
+    make_sum_grad,
 };
 
 pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
@@ -97,6 +98,13 @@ pub fn relu(x: &Tensor) -> Tensor {
     let requires_grad = x.requires_grad();
     let grad_fn = if requires_grad { Some(make_relu_grad(x)) } else { None };
     Tensor::new(data, x.shape(), grad_fn, requires_grad)
+}
+
+pub fn sum(x: &Tensor) -> Tensor {
+    let total: f32 = x.storage().data.iter().sum();
+    let requires_grad = x.requires_grad();
+    let grad_fn = if requires_grad { Some(make_sum_grad(x)) } else { None };
+    Tensor::new(vec![total], &[1], grad_fn, requires_grad)
 }
 
 pub fn linear(x: &Tensor, w: &Tensor, b: &Tensor) -> Tensor {

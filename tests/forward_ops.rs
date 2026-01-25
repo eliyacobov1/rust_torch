@@ -83,3 +83,11 @@ fn mse_loss_forward_matches_expected_value() {
     assert_eq!(loss.shape(), &[1]);
     assert_approx_eq(loss.storage().data.as_slice(), &[0.25], 1e-6);
 }
+
+#[test]
+fn sum_forward_reduces_to_scalar() {
+    let values = Tensor::from_vec_f32(vec![1.0, -2.0, 3.5], &[3], None, false);
+    let out = ops::sum(&values);
+    assert_eq!(out.shape(), &[1]);
+    assert_approx_eq(out.storage().data.as_slice(), &[2.5], 1e-6);
+}

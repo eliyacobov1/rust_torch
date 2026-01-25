@@ -370,3 +370,34 @@ impl GradFn for ReluGrad {
 pub fn make_relu_grad(input: &Tensor) -> GradFnRef {
     Arc::new(ReluGrad { input: input.clone() })
 }
+
+pub struct SumGrad {
+    pub input: Tensor,
+}
+
+impl GradFn for SumGrad {
+    fn backward(&self, grad_out: &[f32]) {
+        assert_eq!(
+            grad_out.len(),
+            1,
+            "sum backward expects scalar grad_out, got {}",
+            grad_out.len()
+        );
+        if let Some(grad_lock) = &self.input.grad_lock() {
+            let mut grad = grad_lock.lock().unwrap();
+            for gi in grad.data.iter_mut() {
+                *gi += grad_out[0];
+            }
+        }
+    }
+
+    fn parents(&self) -> Vec<&Tensor> {
+        vec![&self.input]
+    }
+}
+
+pub fn make_sum_grad(input: &Tensor) -> GradFnRef {
+    Arc::new(SumGrad {
+        input: input.clone(),
+    })
+}
