@@ -335,3 +335,38 @@ pub fn make_mse_loss_grad(predictions: &Tensor, targets: &Tensor, n: f32) -> Gra
         n
     })
 }
+
+pub struct ReluGrad {
+    pub input: Tensor,
+}
+
+impl GradFn for ReluGrad {
+    fn backward(&self, grad_out: &[f32]) {
+        let input_storage = self.input.storage();
+        let input_data = input_storage.data.as_slice();
+        assert_eq!(
+            grad_out.len(),
+            input_data.len(),
+            "relu backward: grad_out len {} != input len {}",
+            grad_out.len(),
+            input_data.len()
+        );
+
+        if let Some(grad_lock) = &self.input.grad_lock() {
+            let mut grad = grad_lock.lock().unwrap();
+            for ((gi, &u), &x) in grad.data.iter_mut().zip(grad_out.iter()).zip(input_data.iter())
+            {
+                if x > 0.0 {
+                    *gi += u;
+                }
+            }
+        }
+    }
+    fn parents(&self) -> Vec<&Tensor> {
+        vec![&self.input]
+    }
+}
+
+pub fn make_relu_grad(input: &Tensor) -> GradFnRef {
+    Arc::new(ReluGrad { input: input.clone() })
+}
