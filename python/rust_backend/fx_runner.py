@@ -16,11 +16,16 @@ _LOG = logging.getLogger(__name__)
 _SUPPORTED_FUNCTIONS = {
     torch.add,
     operator.add,
+    operator.getitem,
     torch.matmul,
     operator.matmul,
     torch.relu,
     torch.nn.functional.relu,
+    torch.nn.functional.batch_norm,
     torch.nn.functional.conv2d,
+    torch.nn.functional.dropout,
+    torch.nn.functional.log_softmax,
+    torch.nn.functional.max_pool2d,
     torch.flatten,
     torch.ops.aten.view.default,
     torch.ops.aten.reshape.default,
@@ -29,11 +34,21 @@ _SUPPORTED_FUNCTIONS = {
     torch.ops.aten.mm.default,
     torch.ops.aten.addmm.default,
     torch.ops.aten.relu.default,
+    torch.ops.aten.batch_norm.default,
+    torch.ops.aten.native_batch_norm.default,
+    torch.ops.aten.native_batch_norm_backward.default,
     torch.ops.aten.convolution.default,
     torch.ops.aten.conv2d.default,
+    torch.ops.aten.dropout.default,
+    torch.ops.aten.native_dropout.default,
+    torch.ops.aten.native_dropout_backward.default,
+    torch.ops.aten.log_softmax.default,
+    torch.ops.aten._log_softmax.default,
     torch.ops.aten.sum.dim_IntList,
     torch.ops.aten.threshold_backward.default,
     torch.ops.aten.sym_size.int,
+    torch.ops.aten.max_pool2d_with_indices.default,
+    torch.ops.aten.max_pool2d_with_indices_backward.default,
     torch.ops.aten.nll_loss_forward.default,
     torch.ops.aten.nll_loss_backward.default,
     torch.ops.aten.convolution_backward.default,
@@ -274,7 +289,9 @@ def _run_graph(gm: GraphModule, *inputs: torch.Tensor) -> torch.Tensor:
             if node.target not in _SUPPORTED_FUNCTIONS:
                 raise RuntimeError(f"Unsupported call_function: {node.target}")
             args = torch.fx.node.map_arg(node.args, lambda n: env[n.name] if hasattr(n, "name") else n)
-            if node.target in (torch.add, operator.add):
+            if node.target is operator.getitem:
+                env[node.name] = args[0][args[1]]
+            elif node.target in (torch.add, operator.add):
                 left = args[0]
                 right = args[1]
                 if _is_torch_tensor(left) or _is_torch_tensor(right):
@@ -331,6 +348,50 @@ def _run_graph(gm: GraphModule, *inputs: torch.Tensor) -> torch.Tensor:
                     reduction=reduction,
                     label_smoothing=label_smoothing,
                 )
+            elif node.target in (torch.nn.functional.batch_norm,):
+                input_t = _to_torch(args[0])
+                running_mean = _to_torch(args[1]) if len(args) > 1 and args[1] is not None else None
+                running_var = _to_torch(args[2]) if len(args) > 2 and args[2] is not None else None
+                weight = _to_torch(args[3]) if len(args) > 3 and args[3] is not None else None
+                bias = _to_torch(args[4]) if len(args) > 4 and args[4] is not None else None
+                training = bool(args[5]) if len(args) > 5 else False
+                momentum = _as_float(args[6]) if len(args) > 6 and args[6] is not None else 0.1
+                eps = _as_float(args[7]) if len(args) > 7 and args[7] is not None else 1e-5
+                env[node.name] = F.batch_norm(
+                    input_t,
+                    running_mean,
+                    running_var,
+                    weight,
+                    bias,
+                    training=training,
+                    momentum=momentum,
+                    eps=eps,
+                )
+            elif node.target in (torch.nn.functional.dropout,):
+                input_t = _to_torch(args[0])
+                p = _as_float(args[1]) if len(args) > 1 and args[1] is not None else 0.5
+                training = bool(args[2]) if len(args) > 2 and args[2] is not None else True
+                inplace = bool(args[3]) if len(args) > 3 and args[3] is not None else False
+                env[node.name] = F.dropout(input_t, p=p, training=training, inplace=inplace)
+            elif node.target in (torch.nn.functional.log_softmax,):
+                input_t = _to_torch(args[0])
+                dim = _as_int(args[1]) if len(args) > 1 and args[1] is not None else -1
+                env[node.name] = F.log_softmax(input_t, dim=dim)
+            elif node.target in (torch.nn.functional.max_pool2d,):
+                input_t = _to_torch(args[0])
+                kernel_size = args[1]
+                stride = args[2] if len(args) > 2 else None
+                padding = args[3] if len(args) > 3 else 0
+                dilation = args[4] if len(args) > 4 else 1
+                ceil_mode = bool(args[5]) if len(args) > 5 else False
+                env[node.name] = F.max_pool2d(
+                    input_t,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                    dilation=dilation,
+                    ceil_mode=ceil_mode,
+                )
             elif node.target is torch.flatten:
                 value = args[0]
                 start_dim = _as_int(args[1]) if len(args) > 1 else 0
@@ -375,6 +436,36 @@ def _run_graph(gm: GraphModule, *inputs: torch.Tensor) -> torch.Tensor:
                     env[node.name] = F.relu(value)
                 else:
                     env[node.name] = _to_pytensor(value).relu()
+            elif node.target is torch.ops.aten.batch_norm.default:
+                converted_args = tuple(_to_torch_arg(arg) for arg in args)
+                env[node.name] = torch.ops.aten.batch_norm.default(*converted_args)
+            elif node.target is torch.ops.aten.native_batch_norm.default:
+                converted_args = tuple(_to_torch_arg(arg) for arg in args)
+                env[node.name] = torch.ops.aten.native_batch_norm.default(*converted_args)
+            elif node.target is torch.ops.aten.native_batch_norm_backward.default:
+                converted_args = tuple(_to_torch_arg(arg) for arg in args)
+                env[node.name] = torch.ops.aten.native_batch_norm_backward.default(*converted_args)
+            elif node.target is torch.ops.aten.dropout.default:
+                converted_args = tuple(_to_torch_arg(arg) for arg in args)
+                env[node.name] = torch.ops.aten.dropout.default(*converted_args)
+            elif node.target is torch.ops.aten.native_dropout.default:
+                converted_args = tuple(_to_torch_arg(arg) for arg in args)
+                env[node.name] = torch.ops.aten.native_dropout.default(*converted_args)
+            elif node.target is torch.ops.aten.native_dropout_backward.default:
+                converted_args = tuple(_to_torch_arg(arg) for arg in args)
+                env[node.name] = torch.ops.aten.native_dropout_backward.default(*converted_args)
+            elif node.target is torch.ops.aten.log_softmax.default:
+                converted_args = tuple(_to_torch_arg(arg) for arg in args)
+                env[node.name] = torch.ops.aten.log_softmax.default(*converted_args)
+            elif node.target is torch.ops.aten._log_softmax.default:
+                converted_args = tuple(_to_torch_arg(arg) for arg in args)
+                env[node.name] = torch.ops.aten._log_softmax.default(*converted_args)
+            elif node.target is torch.ops.aten.max_pool2d_with_indices.default:
+                converted_args = tuple(_to_torch_arg(arg) for arg in args)
+                env[node.name] = torch.ops.aten.max_pool2d_with_indices.default(*converted_args)
+            elif node.target is torch.ops.aten.max_pool2d_with_indices_backward.default:
+                converted_args = tuple(_to_torch_arg(arg) for arg in args)
+                env[node.name] = torch.ops.aten.max_pool2d_with_indices_backward.default(*converted_args)
             elif node.target is torch.ops.aten.sum.dim_IntList:
                 value = args[0]
                 dims = _shape_from_arg(args[1])
@@ -469,10 +560,18 @@ def _run_graph(gm: GraphModule, *inputs: torch.Tensor) -> torch.Tensor:
                 env[node.name] = _flatten_tensor(value, module.start_dim, module.end_dim)
             elif isinstance(module, torch.nn.Conv2d):
                 env[node.name] = module(_to_torch(args[0]))
+            elif isinstance(module, torch.nn.BatchNorm2d):
+                env[node.name] = module(_to_torch(args[0]))
             elif isinstance(module, torch.nn.CrossEntropyLoss):
                 input_t = _to_torch(args[0])
                 target_t = _to_torch(args[1])
                 env[node.name] = module(input_t, target_t)
+            elif isinstance(module, torch.nn.Dropout):
+                env[node.name] = module(_to_torch(args[0]))
+            elif isinstance(module, torch.nn.LogSoftmax):
+                env[node.name] = module(_to_torch(args[0]))
+            elif isinstance(module, torch.nn.MaxPool2d):
+                env[node.name] = module(_to_torch(args[0]))
             else:
                 raise RuntimeError(f"Unsupported call_module: {type(module)}")
         elif node.op == "output":
