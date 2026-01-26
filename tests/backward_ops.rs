@@ -219,6 +219,64 @@ fn linear_backward_propagates_to_weights_and_bias() {
 }
 
 #[test]
+fn dropout_backward_propagates_masked_gradient() {
+    let input = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0], &[2, 2], None, true);
+    let out = ops::dropout(&input, 0.5, true, Some(123));
+    let upstream = vec![1.0; 4];
+    out.grad_fn().expect("dropout grad fn").backward(&upstream);
+
+    let grad_input = input.grad().expect("gradient for input");
+    let expected: Vec<f32> = out
+        .storage()
+        .data
+        .iter()
+        .zip(input.storage().data.iter())
+        .map(|(&out_val, &inp)| if out_val == 0.0 { 0.0 } else { out_val / inp })
+        .collect();
+    assert_approx_eq(&grad_input.data, expected.as_slice(), 1e-6);
+}
+
+#[test]
+fn max_pool2d_backward_routes_gradient_to_max() {
+    let input = Tensor::from_vec_f32(vec![1.0, 3.0, 2.0, 4.0], &[1, 1, 2, 2], None, true);
+    let out = ops::max_pool2d(&input, 2, None, 0, 1, false);
+    out.grad_fn().expect("max_pool2d grad fn").backward(&[1.0]);
+    let grad_input = input.grad().expect("gradient for input");
+    assert_approx_eq(&grad_input.data, &[0.0, 0.0, 0.0, 1.0], 1e-6);
+}
+
+#[test]
+fn batch_norm_backward_matches_expected_gradients() {
+    let input = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2], None, true);
+    let weight = Tensor::from_vec_f32(vec![1.0], &[1], None, true);
+    let bias = Tensor::from_vec_f32(vec![0.0], &[1], None, true);
+
+    let out = ops::batch_norm(
+        &input,
+        None,
+        None,
+        Some(&weight),
+        Some(&bias),
+        true,
+        0.1,
+        1e-5,
+    );
+    let upstream = vec![1.0, 2.0, 3.0, 4.0];
+    out.grad_fn()
+        .expect("batch_norm grad fn")
+        .backward(&upstream);
+
+    let grad_input = input.grad().expect("gradient for input");
+    let grad_weight = weight.grad().expect("gradient for weight");
+    let grad_bias = bias.grad().expect("gradient for bias");
+
+    let expected_input = vec![-1.0732997e-05, -3.5776658e-06, 3.5776658e-06, 1.0732997e-05];
+    assert_approx_eq(&grad_input.data, expected_input.as_slice(), 1e-6);
+    assert_approx_eq(&grad_weight.data, &[4.472118], 1e-5);
+    assert_approx_eq(&grad_bias.data, &[10.0], 1e-6);
+}
+
+#[test]
 fn log_softmax_backward_matches_expected() {
     let values = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0], &[2, 2], None, true);
     let out = ops::log_softmax(&values, 1);

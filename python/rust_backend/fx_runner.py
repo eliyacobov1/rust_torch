@@ -349,49 +349,80 @@ def _run_graph(gm: GraphModule, *inputs: torch.Tensor) -> torch.Tensor:
                     label_smoothing=label_smoothing,
                 )
             elif node.target in (torch.nn.functional.batch_norm,):
-                input_t = _to_torch(args[0])
-                running_mean = _to_torch(args[1]) if len(args) > 1 and args[1] is not None else None
-                running_var = _to_torch(args[2]) if len(args) > 2 and args[2] is not None else None
-                weight = _to_torch(args[3]) if len(args) > 3 and args[3] is not None else None
-                bias = _to_torch(args[4]) if len(args) > 4 and args[4] is not None else None
+                input_v = args[0]
+                running_mean = args[1] if len(args) > 1 else None
+                running_var = args[2] if len(args) > 2 else None
+                weight = args[3] if len(args) > 3 else None
+                bias = args[4] if len(args) > 4 else None
                 training = bool(args[5]) if len(args) > 5 else False
                 momentum = _as_float(args[6]) if len(args) > 6 and args[6] is not None else 0.1
                 eps = _as_float(args[7]) if len(args) > 7 and args[7] is not None else 1e-5
-                env[node.name] = F.batch_norm(
-                    input_t,
-                    running_mean,
-                    running_var,
-                    weight,
-                    bias,
-                    training=training,
-                    momentum=momentum,
-                    eps=eps,
-                )
+                if any(
+                    _is_torch_tensor(val)
+                    for val in (input_v, running_mean, running_var, weight, bias)
+                    if val is not None
+                ):
+                    env[node.name] = F.batch_norm(
+                        _to_torch(input_v),
+                        _to_torch(running_mean) if running_mean is not None else None,
+                        _to_torch(running_var) if running_var is not None else None,
+                        _to_torch(weight) if weight is not None else None,
+                        _to_torch(bias) if bias is not None else None,
+                        training=training,
+                        momentum=momentum,
+                        eps=eps,
+                    )
+                else:
+                    env[node.name] = _to_pytensor(input_v).batch_norm(
+                        _to_pytensor(running_mean) if running_mean is not None else None,
+                        _to_pytensor(running_var) if running_var is not None else None,
+                        _to_pytensor(weight) if weight is not None else None,
+                        _to_pytensor(bias) if bias is not None else None,
+                        training=training,
+                        momentum=momentum,
+                        eps=eps,
+                    )
             elif node.target in (torch.nn.functional.dropout,):
-                input_t = _to_torch(args[0])
+                input_v = args[0]
                 p = _as_float(args[1]) if len(args) > 1 and args[1] is not None else 0.5
                 training = bool(args[2]) if len(args) > 2 and args[2] is not None else True
                 inplace = bool(args[3]) if len(args) > 3 and args[3] is not None else False
-                env[node.name] = F.dropout(input_t, p=p, training=training, inplace=inplace)
+                if _is_torch_tensor(input_v):
+                    env[node.name] = F.dropout(_to_torch(input_v), p=p, training=training, inplace=inplace)
+                else:
+                    if inplace:
+                        raise RuntimeError("inplace dropout not supported for rustorch tensors")
+                    env[node.name] = _to_pytensor(input_v).dropout(p=p, training=training)
             elif node.target in (torch.nn.functional.log_softmax,):
                 input_t = _to_torch(args[0])
                 dim = _as_int(args[1]) if len(args) > 1 and args[1] is not None else -1
                 env[node.name] = F.log_softmax(input_t, dim=dim)
             elif node.target in (torch.nn.functional.max_pool2d,):
-                input_t = _to_torch(args[0])
+                input_v = args[0]
                 kernel_size = args[1]
                 stride = args[2] if len(args) > 2 else None
                 padding = args[3] if len(args) > 3 else 0
                 dilation = args[4] if len(args) > 4 else 1
                 ceil_mode = bool(args[5]) if len(args) > 5 else False
-                env[node.name] = F.max_pool2d(
-                    input_t,
-                    kernel_size=kernel_size,
-                    stride=stride,
-                    padding=padding,
-                    dilation=dilation,
-                    ceil_mode=ceil_mode,
-                )
+                if _is_torch_tensor(input_v):
+                    env[node.name] = F.max_pool2d(
+                        _to_torch(input_v),
+                        kernel_size=kernel_size,
+                        stride=stride,
+                        padding=padding,
+                        dilation=dilation,
+                        ceil_mode=ceil_mode,
+                    )
+                else:
+                    if not isinstance(kernel_size, int):
+                        raise RuntimeError("rustorch max_pool2d expects integer kernel_size")
+                    env[node.name] = _to_pytensor(input_v).max_pool2d(
+                        kernel_size=kernel_size,
+                        stride=stride,
+                        padding=padding,
+                        dilation=dilation,
+                        ceil_mode=ceil_mode,
+                    )
             elif node.target is torch.flatten:
                 value = args[0]
                 start_dim = _as_int(args[1]) if len(args) > 1 else 0

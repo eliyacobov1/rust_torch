@@ -1,13 +1,14 @@
-
 #![cfg(feature = "python-bindings")]
 
-use pyo3::prelude::*;
-use numpy::{IntoPyArray, PyArrayDyn, PyReadonlyArrayDyn, PyUntypedArrayMethods};
 use crate::{ops, tensor::Tensor};
 use ndarray::ArrayD;
+use numpy::{IntoPyArray, PyArrayDyn, PyReadonlyArrayDyn, PyUntypedArrayMethods};
+use pyo3::prelude::*;
 
 #[pyclass]
-pub struct PyTensor { inner: Tensor }
+pub struct PyTensor {
+    inner: Tensor,
+}
 
 #[pymodule]
 pub fn rustorch(_py: Python, m: &PyModule) -> PyResult<()> {
@@ -49,6 +50,59 @@ impl PyTensor {
     fn relu(&self) -> PyTensor {
         PyTensor {
             inner: ops::relu(&self.inner),
+        }
+    }
+
+    #[pyo3(signature = (p=0.5, training=true, seed=None))]
+    fn dropout(&self, p: f32, training: bool, seed: Option<u64>) -> PyTensor {
+        PyTensor {
+            inner: ops::dropout(&self.inner, p, training, seed),
+        }
+    }
+
+    #[pyo3(signature = (kernel_size, stride=None, padding=0, dilation=1, ceil_mode=false))]
+    fn max_pool2d(
+        &self,
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+        dilation: usize,
+        ceil_mode: bool,
+    ) -> PyTensor {
+        PyTensor {
+            inner: ops::max_pool2d(
+                &self.inner,
+                kernel_size,
+                stride,
+                padding,
+                dilation,
+                ceil_mode,
+            ),
+        }
+    }
+
+    #[pyo3(signature = (running_mean=None, running_var=None, weight=None, bias=None, training=false, momentum=0.1, eps=1e-5))]
+    fn batch_norm(
+        &self,
+        running_mean: Option<&PyTensor>,
+        running_var: Option<&PyTensor>,
+        weight: Option<&PyTensor>,
+        bias: Option<&PyTensor>,
+        training: bool,
+        momentum: f32,
+        eps: f32,
+    ) -> PyTensor {
+        PyTensor {
+            inner: ops::batch_norm(
+                &self.inner,
+                running_mean.map(|t| &t.inner),
+                running_var.map(|t| &t.inner),
+                weight.map(|t| &t.inner),
+                bias.map(|t| &t.inner),
+                training,
+                momentum,
+                eps,
+            ),
         }
     }
 

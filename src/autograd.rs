@@ -198,6 +198,199 @@ pub fn make_mul_grad(a: &Tensor, b: &Tensor, output_shape: &[usize]) -> GradFnRe
     })
 }
 
+struct DropoutGrad {
+    input: Tensor,
+    mask: Vec<f32>,
+    scale: f32,
+}
+
+impl GradFn for DropoutGrad {
+    fn backward(&self, grad_out: &[f32]) {
+        if let Some(grad_lock) = &self.input.grad_lock() {
+            let mut grad = grad_lock.lock().unwrap();
+            for (gi, (&go, &mask)) in grad
+                .data
+                .iter_mut()
+                .zip(grad_out.iter().zip(self.mask.iter()))
+            {
+                *gi += go * mask * self.scale;
+            }
+        }
+    }
+
+    fn parents(&self) -> Vec<&Tensor> {
+        vec![&self.input]
+    }
+}
+
+pub fn make_dropout_grad(input: &Tensor, mask: Vec<f32>, scale: f32) -> GradFnRef {
+    Arc::new(DropoutGrad {
+        input: input.clone(),
+        mask,
+        scale,
+    })
+}
+
+struct MaxPool2dGrad {
+    input: Tensor,
+    indices: Vec<usize>,
+}
+
+impl GradFn for MaxPool2dGrad {
+    fn backward(&self, grad_out: &[f32]) {
+        if let Some(grad_lock) = &self.input.grad_lock() {
+            let mut grad = grad_lock.lock().unwrap();
+            for (&go, &idx) in grad_out.iter().zip(self.indices.iter()) {
+                grad.data[idx] += go;
+            }
+        }
+    }
+
+    fn parents(&self) -> Vec<&Tensor> {
+        vec![&self.input]
+    }
+}
+
+pub fn make_max_pool2d_grad(input: &Tensor, indices: Vec<usize>) -> GradFnRef {
+    Arc::new(MaxPool2dGrad {
+        input: input.clone(),
+        indices,
+    })
+}
+
+struct BatchNormGrad {
+    input: Tensor,
+    weight: Option<Tensor>,
+    bias: Option<Tensor>,
+    mean: Vec<f32>,
+    inv_std: Vec<f32>,
+}
+
+impl GradFn for BatchNormGrad {
+    fn backward(&self, grad_out: &[f32]) {
+        let shape = self.input.shape();
+        assert_eq!(shape.len(), 4, "batch_norm expects NCHW input");
+        let n = shape[0];
+        let c = shape[1];
+        let h = shape[2];
+        let w = shape[3];
+        let hw = h * w;
+        let channel_size = n * hw;
+
+        let mut grad_input = vec![0.0f32; self.input.numel()];
+        let mut grad_weight = vec![0.0f32; c];
+        let mut grad_bias = vec![0.0f32; c];
+
+        for channel in 0..c {
+            let mean = self.mean[channel];
+            let inv_std = self.inv_std[channel];
+            let mut sum_dxhat = 0.0f32;
+            let mut sum_dxhat_xmu = 0.0f32;
+            let mut sum_xmu = 0.0f32;
+
+            for batch in 0..n {
+                for idx in 0..hw {
+                    let offset = ((batch * c + channel) * hw) + idx;
+                    let x = self.input.storage().data[offset];
+                    let x_mu = x - mean;
+                    let mut go = grad_out[offset];
+                    if let Some(weight) = &self.weight {
+                        go *= weight.storage().data[channel];
+                    }
+                    sum_dxhat += go;
+                    sum_dxhat_xmu += go * x_mu;
+                    sum_xmu += x_mu;
+                }
+            }
+
+            let dvar = sum_dxhat_xmu * -0.5 * inv_std.powi(3);
+            let dmean = sum_dxhat * -inv_std + dvar * (-2.0 * sum_xmu / channel_size as f32);
+            for batch in 0..n {
+                for idx in 0..hw {
+                    let offset = ((batch * c + channel) * hw) + idx;
+                    let x = self.input.storage().data[offset];
+                    let x_mu = x - mean;
+                    let mut go = grad_out[offset];
+                    if let Some(weight) = &self.weight {
+                        go *= weight.storage().data[channel];
+                    }
+                    let dx = go * inv_std
+                        + dvar * 2.0 * x_mu / channel_size as f32
+                        + dmean / channel_size as f32;
+                    grad_input[offset] = dx;
+                }
+            }
+
+            let mut sum_grad = 0.0f32;
+            let mut sum_grad_xhat = 0.0f32;
+            for batch in 0..n {
+                for idx in 0..hw {
+                    let offset = ((batch * c + channel) * hw) + idx;
+                    let x = self.input.storage().data[offset];
+                    let x_hat = (x - mean) * inv_std;
+                    let go = grad_out[offset];
+                    sum_grad += go;
+                    sum_grad_xhat += go * x_hat;
+                }
+            }
+            grad_bias[channel] = sum_grad;
+            grad_weight[channel] = sum_grad_xhat;
+        }
+
+        if let Some(grad_lock) = &self.input.grad_lock() {
+            let mut grad = grad_lock.lock().unwrap();
+            for (gi, &dx) in grad.data.iter_mut().zip(grad_input.iter()) {
+                *gi += dx;
+            }
+        }
+
+        if let Some(weight) = &self.weight {
+            if let Some(weight_grad) = &weight.grad_lock() {
+                let mut grad = weight_grad.lock().unwrap();
+                for (gi, &dw) in grad.data.iter_mut().zip(grad_weight.iter()) {
+                    *gi += dw;
+                }
+            }
+        }
+
+        if let Some(bias) = &self.bias {
+            if let Some(bias_grad) = &bias.grad_lock() {
+                let mut grad = bias_grad.lock().unwrap();
+                for (gi, &db) in grad.data.iter_mut().zip(grad_bias.iter()) {
+                    *gi += db;
+                }
+            }
+        }
+    }
+
+    fn parents(&self) -> Vec<&Tensor> {
+        let mut parents = vec![&self.input];
+        if let Some(weight) = &self.weight {
+            parents.push(weight);
+        }
+        if let Some(bias) = &self.bias {
+            parents.push(bias);
+        }
+        parents
+    }
+}
+
+pub fn make_batch_norm_grad(
+    input: &Tensor,
+    weight: Option<&Tensor>,
+    bias: Option<&Tensor>,
+    mean: Vec<f32>,
+    inv_std: Vec<f32>,
+) -> GradFnRef {
+    Arc::new(BatchNormGrad {
+        input: input.clone(),
+        weight: weight.cloned(),
+        bias: bias.cloned(),
+        mean,
+        inv_std,
+    })
+}
+
 struct LogSoftmaxGrad {
     input: Tensor,
     output_data: Vec<f32>,

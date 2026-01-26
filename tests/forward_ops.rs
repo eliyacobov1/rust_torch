@@ -129,3 +129,42 @@ fn nll_loss_forward_matches_expected() {
     assert_eq!(loss.shape(), &[1]);
     assert_approx_eq(loss.storage().data.as_slice(), &[expected], 1e-6);
 }
+
+#[test]
+fn max_pool2d_forward_picks_max_values() {
+    let input = Tensor::from_vec_f32(vec![1.0, 3.0, 2.0, 4.0], &[1, 1, 2, 2], None, false);
+    let out = ops::max_pool2d(&input, 2, None, 0, 1, false);
+    assert_eq!(out.shape(), &[1, 1, 1, 1]);
+    assert_approx_eq(out.storage().data.as_slice(), &[4.0], 1e-6);
+}
+
+#[test]
+fn dropout_forward_zeroes_and_scales() {
+    let input = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0], &[2, 2], None, false);
+    let out = ops::dropout(&input, 0.5, true, Some(123));
+    for (&inp, &out_val) in input.storage().data.iter().zip(out.storage().data.iter()) {
+        if out_val == 0.0 {
+            continue;
+        }
+        assert_approx_eq(&[out_val], &[inp * 2.0], 1e-6);
+    }
+}
+
+#[test]
+fn batch_norm_forward_applies_affine_transform() {
+    let input = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2], None, false);
+    let weight = Tensor::from_vec_f32(vec![2.0], &[1], None, false);
+    let bias = Tensor::from_vec_f32(vec![0.5], &[1], None, false);
+    let out = ops::batch_norm(
+        &input,
+        None,
+        None,
+        Some(&weight),
+        Some(&bias),
+        true,
+        0.1,
+        1e-5,
+    );
+    let expected = vec![-2.1832708, -0.3944236, 1.3944236, 3.1832708];
+    assert_approx_eq(out.storage().data.as_slice(), expected.as_slice(), 1e-4);
+}

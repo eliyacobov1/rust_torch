@@ -1,14 +1,14 @@
 use std::array;
 use std::marker::PhantomData;
+use std::ops::{Add, Index, IndexMut, Mul};
 use std::sync::{Arc, Mutex};
-use std::ops::{Index, IndexMut, Mul, Add};
 
+use crate::autograd::{make_broadcast_grad, make_reshape_grad, Grad, GradFn};
 use crate::storage::Storage;
-use crate::autograd::{GradFn, Grad, make_broadcast_grad, make_reshape_grad};
 
 pub type GradFnRef = Arc<dyn GradFn + Send + Sync>;
 
-fn batch_iter<'a>(batch_shape: &'a[usize]) -> impl Iterator<Item = Vec<usize>> + 'a {
+fn batch_iter<'a>(batch_shape: &'a [usize]) -> impl Iterator<Item = Vec<usize>> + 'a {
     let total: usize = batch_shape.iter().product();
     (0..total).map(move |mut idx| {
         let mut coord = vec![0; batch_shape.len()];
@@ -37,12 +37,7 @@ impl<'a> Iterator for BatchIterMut<'a> {
         }
 
         let start = self.idx * self.batch_size;
-        let slice = unsafe {
-            std::slice::from_raw_parts_mut(
-                self.ptr.add(start),
-                self.batch_size,
-            )
-        };
+        let slice = unsafe { std::slice::from_raw_parts_mut(self.ptr.add(start), self.batch_size) };
 
         self.idx += 1;
         Some(slice)
@@ -75,31 +70,40 @@ pub struct Tensor {
 }
 
 impl Tensor {
-    pub fn new(v: Vec<f32>, shape: &[usize], grad_fn: Option<GradFnRef>, requires_grad: bool) -> Self {
+    pub fn new(
+        v: Vec<f32>,
+        shape: &[usize],
+        grad_fn: Option<GradFnRef>,
+        requires_grad: bool,
+    ) -> Self {
         Self {
-            inner: TensorInner::from_vec_f32(v, shape, grad_fn, requires_grad)
+            inner: TensorInner::from_vec_f32(v, shape, grad_fn, requires_grad),
         }
     }
 
     pub fn zeros(shape: &[usize], requires_grad: bool) -> Self {
         Self {
-            inner: Arc::new(TensorInner::zeros(shape, requires_grad))
+            inner: Arc::new(TensorInner::zeros(shape, requires_grad)),
         }
     }
 
     pub fn ones(shape: &[usize], requires_grad: bool) -> Self {
         Self {
-            inner: Arc::new(TensorInner::ones(shape, requires_grad))
+            inner: Arc::new(TensorInner::ones(shape, requires_grad)),
         }
     }
 
-    pub fn shape(&self) -> &[usize] { self.inner.shape() }
+    pub fn shape(&self) -> &[usize] {
+        self.inner.shape()
+    }
 
-    pub fn numel(&self) -> usize { self.inner.numel() }
+    pub fn numel(&self) -> usize {
+        self.inner.numel()
+    }
 
     pub fn transpose(&self) -> Self {
         Self {
-            inner: Arc::new(self.inner.transpose())
+            inner: Arc::new(self.inner.transpose()),
         }
     }
 
@@ -130,9 +134,14 @@ impl Tensor {
             .as_mut()
     }
 
-    pub fn from_vec_f32(v: Vec<f32>, shape: &[usize], grad_fn: Option<GradFnRef>, requires_grad: bool) -> Self {
+    pub fn from_vec_f32(
+        v: Vec<f32>,
+        shape: &[usize],
+        grad_fn: Option<GradFnRef>,
+        requires_grad: bool,
+    ) -> Self {
         Self {
-            inner: TensorInner::from_vec_f32(v, shape, grad_fn, requires_grad)
+            inner: TensorInner::from_vec_f32(v, shape, grad_fn, requires_grad),
         }
     }
 
@@ -140,8 +149,8 @@ impl Tensor {
         let mut out = Vec::new();
         let max_len = a.len().max(b.len());
         for i in 0..max_len {
-            let ad = *a.get(a.len().wrapping_sub(i+1)).unwrap_or(&1);
-            let bd = *b.get(b.len().wrapping_sub(i+1)).unwrap_or(&1);
+            let ad = *a.get(a.len().wrapping_sub(i + 1)).unwrap_or(&1);
+            let bd = *b.get(b.len().wrapping_sub(i + 1)).unwrap_or(&1);
             if ad != bd && ad != 1 && bd != 1 {
                 panic!("Shapes not broadcastable: {:?} vs {:?}", a, b);
             }
@@ -160,7 +169,10 @@ impl Tensor {
     pub fn broadcast_to(&self, target_shape: &[usize]) -> Tensor {
         // TODO: broadcast optimizations (no copy, etc)
         let src_shape = self.shape();
-        assert!( target_shape.len() >= src_shape.len(), "Cannot broadcast to fewer dimensions" );
+        assert!(
+            target_shape.len() >= src_shape.len(),
+            "Cannot broadcast to fewer dimensions"
+        );
 
         // Align dimensions (pad with 1s on the left)
         let mut src_aligned = vec![1; target_shape.len()];
@@ -218,15 +230,27 @@ impl Tensor {
             flat
         }
 
-        broadcast_index(&self.storage().data, &src_aligned, target_shape, &mut out_data);
-        let grad_fn = if self.requires_grad() {Some(make_broadcast_grad(self, target_shape))} else {None};
+        broadcast_index(
+            &self.storage().data,
+            &src_aligned,
+            target_shape,
+            &mut out_data,
+        );
+        let grad_fn = if self.requires_grad() {
+            Some(make_broadcast_grad(self, target_shape))
+        } else {
+            None
+        };
         Self::new(out_data, target_shape, grad_fn, self.requires_grad())
     }
 
     pub fn reshape(&self, new_shape: &[usize]) -> Self {
         let old_numel: usize = self.shape().iter().product();
         let new_numel: usize = new_shape.iter().product();
-        assert_eq!(old_numel, new_numel, "Cannot reshape: number of elements must remain the same");
+        assert_eq!(
+            old_numel, new_numel,
+            "Cannot reshape: number of elements must remain the same"
+        );
 
         let grad_fn = if self.requires_grad() {
             Some(make_reshape_grad(self, new_shape))
@@ -235,13 +259,17 @@ impl Tensor {
         };
 
         let inner = TensorInner {
-            storage: Storage { data: self.storage().data.clone() },
+            storage: Storage {
+                data: self.storage().data.clone(),
+            },
             requires_grad: self.requires_grad(),
             grad: self.inner.grad.as_ref().map(Arc::clone),
             grad_fn,
             shape: new_shape.to_vec(),
         };
-        Tensor { inner: Arc::new(inner) }
+        Tensor {
+            inner: Arc::new(inner),
+        }
     }
 
     pub(crate) fn inner(&self) -> &Arc<TensorInner> {
@@ -284,16 +312,12 @@ impl Matrix {
             None => vec![0.0; rows * cols],
         };
         let tensor = Tensor::new(data, &shape, None, requires_grad);
-        Self {
-            tensor: tensor
-        }
+        Self { tensor: tensor }
     }
 
     fn from_tensor(tensor: Tensor) -> Self {
         assert_eq!(tensor.inner.shape.len(), 2);
-        Self {
-            tensor: tensor
-        }
+        Self { tensor: tensor }
     }
 
     fn height(&self) -> usize {
@@ -371,17 +395,31 @@ impl_mul_tensor!(&Matrix, Matrix);
 impl_mul_tensor!(Matrix, Matrix);
 
 impl TensorInner {
-    pub fn new(v: Vec<f32>, shape: &[usize], grad_fn: Option<GradFnRef>, requires_grad: bool) -> Self {
+    pub fn new(
+        v: Vec<f32>,
+        shape: &[usize],
+        grad_fn: Option<GradFnRef>,
+        requires_grad: bool,
+    ) -> Self {
         Self {
-                storage: Storage{data: v},
-                requires_grad,
-                grad: if requires_grad {Some(Arc::new(Mutex::new(Grad::zeros_like_shape(&shape))))} else {None},
-                grad_fn,
-                shape: shape.to_vec(),
+            storage: Storage { data: v },
+            requires_grad,
+            grad: if requires_grad {
+                Some(Arc::new(Mutex::new(Grad::zeros_like_shape(&shape))))
+            } else {
+                None
+            },
+            grad_fn,
+            shape: shape.to_vec(),
         }
     }
 
-    pub fn from_vec_f32(v: Vec<f32>, shape: &[usize], grad_fn: Option<GradFnRef>, requires_grad: bool) -> Arc<Self> {
+    pub fn from_vec_f32(
+        v: Vec<f32>,
+        shape: &[usize],
+        grad_fn: Option<GradFnRef>,
+        requires_grad: bool,
+    ) -> Arc<Self> {
         Arc::new(Self::new(v, shape, grad_fn, requires_grad))
     }
     pub fn zeros(shape: &[usize], requires_grad: bool) -> Self {
@@ -391,10 +429,15 @@ impl TensorInner {
         Self::full(shape, 1.0, requires_grad)
     }
     fn full(shape: &[usize], value: f32, requires_grad: bool) -> Self {
-        Self::new(vec![value; shape.iter().product()], shape, None, requires_grad)
+        Self::new(
+            vec![value; shape.iter().product()],
+            shape,
+            None,
+            requires_grad,
+        )
     }
-    pub fn numel(&self) -> usize { 
-        self.shape.iter().product() 
+    pub fn numel(&self) -> usize {
+        self.shape.iter().product()
     }
 
     pub fn transpose(&self) -> Self {
@@ -405,14 +448,16 @@ impl TensorInner {
         let mut out = TensorInner::zeros(&[n, m], self.requires_grad);
 
         // iterate over batches
-        for ([a_mat], [out_mat_buf]) in TensorInner::iter_batches(&[&self], &mut[&mut out]) {
+        for ([a_mat], [out_mat_buf]) in TensorInner::iter_batches(&[&self], &mut [&mut out]) {
             let result = Matrix::from_tensor(a_mat).transpose();
             out_mat_buf.copy_from_slice(result.tensor.inner.storage.data.as_slice());
         }
         out
     }
 
-    pub fn shape(&self) -> &[usize] { &self.shape }
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
 
     pub fn num_of_matrices(&self) -> usize {
         self.shape.iter().rev().skip(2).product::<usize>()
@@ -428,24 +473,40 @@ impl TensorInner {
 
     fn matrix_dims(&self) -> [usize; 2] {
         let dims = &self.shape[(self.shape.len()).saturating_sub(2)..];
-        dims.try_into().expect("Expected exactly 2 matrix dimensions")
+        dims.try_into()
+            .expect("Expected exactly 2 matrix dimensions")
     }
 
     pub(crate) fn iter_batches<'a, const N: usize, const K: usize>(
         input_tensors: &'a [&TensorInner; N],
         output_tensors: &'a mut [&mut TensorInner; K],
-    ) -> impl Iterator<Item = ([Tensor; N], [&'a mut[f32]; K])> + 'a {
-        assert!(input_tensors.len() > 0, "Input tensor array must not be empty.");
+    ) -> impl Iterator<Item = ([Tensor; N], [&'a mut [f32]; K])> + 'a {
+        assert!(
+            input_tensors.len() > 0,
+            "Input tensor array must not be empty."
+        );
         let batch_shape = &input_tensors[0].shape[..input_tensors[0].shape.len() - 2];
         for t in input_tensors.iter() {
-            assert_eq!(t.batch_dims(), batch_shape, "All tensors must have identical batch dimensions");
+            assert_eq!(
+                t.batch_dims(),
+                batch_shape,
+                "All tensors must have identical batch dimensions"
+            );
         }
 
-        let mut input_batch_iters: Vec<_> = input_tensors.iter().map(|t| t.batch_tensor_iter(batch_shape)).collect();
-        let mut output_batch_iters: Vec<BatchIterMut> = output_tensors.iter_mut().map(|t| t.batch_iter_mut()).collect();
+        let mut input_batch_iters: Vec<_> = input_tensors
+            .iter()
+            .map(|t| t.batch_tensor_iter(batch_shape))
+            .collect();
+        let mut output_batch_iters: Vec<BatchIterMut> = output_tensors
+            .iter_mut()
+            .map(|t| t.batch_iter_mut())
+            .collect();
         (0..input_tensors[0].num_of_matrices()).map(move |_| {
-            (array::from_fn(|i| Tensor::from_inner(input_batch_iters[i].next().unwrap())),
-             array::from_fn(|i| output_batch_iters[i].next().unwrap()))
+            (
+                array::from_fn(|i| Tensor::from_inner(input_batch_iters[i].next().unwrap())),
+                array::from_fn(|i| output_batch_iters[i].next().unwrap()),
+            )
         })
     }
 
@@ -477,9 +538,11 @@ impl TensorInner {
     fn get_batch(&self, batch_index: &[usize]) -> TensorInner {
         let (batch_start, batch_end) = self.batch_range(batch_index);
         let [m, n] = self.matrix_dims();
-        
+
         TensorInner {
-            storage: Storage{data: self.storage.data[batch_start..batch_end].to_vec()},
+            storage: Storage {
+                data: self.storage.data[batch_start..batch_end].to_vec(),
+            },
             requires_grad: self.requires_grad,
             grad: None,
             grad_fn: None,
@@ -500,10 +563,13 @@ impl TensorInner {
     pub fn batch_tensor_iter<'a>(
         &'a self,
         batch_shape: &'a [usize],
-    ) -> BatchTensorIter<'a, impl Iterator<Item = Vec<usize>> + 'a, impl FnMut(Vec<usize>) -> TensorInner + 'a> {
-        let iter = batch_iter(batch_shape)
-            .map(move |batch_index| self.get_batch(&batch_index));
-        BatchTensorIter { 
+    ) -> BatchTensorIter<
+        'a,
+        impl Iterator<Item = Vec<usize>> + 'a,
+        impl FnMut(Vec<usize>) -> TensorInner + 'a,
+    > {
+        let iter = batch_iter(batch_shape).map(move |batch_index| self.get_batch(&batch_index));
+        BatchTensorIter {
             inner: iter,
             _marker: PhantomData,
         }

@@ -16,6 +16,7 @@ python-bindings = ["pyo3", "numpy", "ndarray"]
 rayon = "1.10"
 anyhow = "1"
 thiserror = "1"
+rand = "0.8"
 
 pyo3 = { version = "0.21", features = ["extension-module"], optional = true }
 numpy = { version = "0.21", optional = true }
