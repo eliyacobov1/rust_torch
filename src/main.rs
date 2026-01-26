@@ -1,5 +1,5 @@
-use rustorch::{ops, autograd};
 use rustorch::tensor::Tensor;
+use rustorch::{autograd, ops};
 
 fn main() {
     // Simulate a batch of 2 samples, 2 features each
@@ -13,16 +13,20 @@ fn main() {
 
     // Forward pass: x -> linear -> relu -> linear -> scalar output
     let h1 = ops::linear(&x, &w1, &b1); // [2, 3]
-    let h1_relu = ops::relu(&h1);       // [2, 3]
+    let h1_relu = ops::relu(&h1); // [2, 3]
     let logits = ops::linear(&h1_relu, &w2, &b2); // [2, 1]
-    // For simplicity, sum the logits to get a single scalar output (like reduction)
+                                                  // For simplicity, sum the logits to get a single scalar output (like reduction)
     let output = ops::sum(&logits);
 
     // Target: single scalar
     let target = Tensor::from_vec_f32(vec![1.0], &[1], None, false);
     let loss = ops::mse_loss(&output, &target);
 
-    println!("Network output: {:?}, Loss: {}", output.storage().data, loss.storage().data[0]);
+    println!(
+        "Network output: {:?}, Loss: {}",
+        output.storage().data,
+        loss.storage().data[0]
+    );
     autograd::backward(&loss);
 
     if let Some(g) = &x.grad() {

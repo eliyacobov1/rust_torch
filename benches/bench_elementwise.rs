@@ -8,7 +8,9 @@ fn bench_add(c: &mut Criterion) {
             let a: Vec<f32> = vec![1.0; n];
             let b_: Vec<f32> = vec![2.0; n];
             let mut out = vec![0.0f32; n];
-            for i in 0..n { out[i] = a[i] + b_[i]; }
+            for i in 0..n {
+                out[i] = a[i] + b_[i];
+            }
         });
     });
 }

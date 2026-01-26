@@ -37,9 +37,11 @@ associated test/demo coverage.
   ops needed by the demo (M1/M3).
 - Parity harness tests now compare eager vs compiled forward/grad results for
   representative MLP and CNN models (M4).
+- `log_softmax` + `nll_loss` ops are available to support classification losses
+  outside of the MNIST demo path.
 
 ## Next recommended task (post-M4)
-**Expand operator + autograd coverage for production training loops.**
+**Expand operator + autograd coverage for production CNN training loops.**
 
 **Why this next?**
 - Parity harness coverage is in place, but the operator surface is still too
@@ -48,8 +50,8 @@ associated test/demo coverage.
   more realistic models and provides higher confidence in correctness.
 
 **Scope (significant, production-oriented)**
-- Implement forward/backward kernels for `max_pool2d`, `batch_norm`, `dropout`,
-  `log_softmax`, and `nll_loss` (or `cross_entropy` fused paths).
+- Implement forward/backward kernels for `max_pool2d`, `batch_norm`, and
+  `dropout`, plus any missing fused `cross_entropy` paths.
 - Extend FX lowering to route these ops through the Rust backend with clear
   error messages when unsupported.
 - Add Rust tests in `tests/` for forward/backward parity of new kernels.
@@ -60,8 +62,8 @@ associated test/demo coverage.
 **Build the "CNN training stack" operator set with full parity coverage.**
 
 **Acceptance criteria**
-- Forward/backward kernels for `max_pool2d`, `batch_norm`, `log_softmax`,
-  `nll_loss` (or fused `cross_entropy`) implemented in Rust.
+- Forward/backward kernels for `max_pool2d`, `batch_norm`, and `dropout`
+  implemented in Rust, along with any missing fused `cross_entropy` paths.
 - FX lowering routes these ops to the Rust backend and emits clear errors for
   unsupported tensor layouts or shapes.
 - Parity harness extended with a CNN + batchnorm + pooling model and validated
@@ -78,7 +80,8 @@ associated test/demo coverage.
 ## Production readiness roadmap (proposed)
 1. **Operator + autograd coverage for common training stacks**
    - Implement backward ops needed for CNNs and MLPs beyond MNIST (conv2d, maxpool2d,
-     batchnorm, log_softmax, and cross-entropy loss), plus corresponding FX lowering.
+     batchnorm, dropout, and any missing cross-entropy loss paths), plus corresponding
+     FX lowering.
    - Expand Rust and Python tests to cover forward/backward parity.
 2. **Shape/stride semantics and error handling**
    - Introduce robust shape inference, contiguous/strided tensor semantics, and

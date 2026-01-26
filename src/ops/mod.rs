@@ -1,12 +1,15 @@
 pub mod kernels;
 
 use crate::autograd::{
-    make_add_grad, make_log_softmax_grad, make_matmul_grad, make_mse_loss_grad, make_mul_grad,
-    make_nll_loss_grad, make_relu_grad, make_sum_grad,
+    make_add_grad, make_batch_norm_grad, make_dropout_grad, make_log_softmax_grad,
+    make_matmul_grad, make_max_pool2d_grad, make_mse_loss_grad, make_mul_grad, make_nll_loss_grad,
+    make_relu_grad, make_sum_grad,
 };
 use crate::tensor::Tensor;
 use crate::tensor::TensorInner;
 use kernels::{add_kernel, matmul_kernel, mul_kernel};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::sync::Arc;
 
 pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
@@ -127,6 +130,40 @@ pub fn relu(x: &Tensor) -> Tensor {
     Tensor::new(data, x.shape(), grad_fn, requires_grad)
 }
 
+pub fn dropout(x: &Tensor, p: f32, training: bool, seed: Option<u64>) -> Tensor {
+    assert!((0.0..1.0).contains(&p), "dropout p must be in [0, 1)");
+    let requires_grad = x.requires_grad();
+    if !training {
+        let grad_fn = if requires_grad {
+            Some(make_dropout_grad(x, vec![1.0; x.numel()], 1.0))
+        } else {
+            None
+        };
+        return Tensor::new(x.storage().data.clone(), x.shape(), grad_fn, requires_grad);
+    }
+
+    let mut rng = match seed {
+        Some(seed) => StdRng::seed_from_u64(seed),
+        None => StdRng::from_entropy(),
+    };
+    let scale = 1.0 / (1.0 - p);
+    let mut mask = Vec::with_capacity(x.numel());
+    let mut out = Vec::with_capacity(x.numel());
+    for &val in x.storage().data.iter() {
+        let keep = rng.gen::<f32>() >= p;
+        let m = if keep { 1.0 } else { 0.0 };
+        mask.push(m);
+        out.push(val * m * scale);
+    }
+
+    let grad_fn = if requires_grad {
+        Some(make_dropout_grad(x, mask, scale))
+    } else {
+        None
+    };
+    Tensor::new(out, x.shape(), grad_fn, requires_grad)
+}
+
 fn normalize_dim(dim: isize, rank: usize) -> usize {
     let mut dim = dim;
     if dim < 0 {
@@ -177,6 +214,72 @@ pub fn log_softmax(x: &Tensor, dim: isize) -> Tensor {
     output
 }
 
+pub fn max_pool2d(
+    x: &Tensor,
+    kernel_size: usize,
+    stride: Option<usize>,
+    padding: usize,
+    dilation: usize,
+    ceil_mode: bool,
+) -> Tensor {
+    assert_eq!(x.shape().len(), 4, "max_pool2d expects NCHW input");
+    assert_eq!(padding, 0, "max_pool2d padding not supported");
+    assert_eq!(dilation, 1, "max_pool2d dilation not supported");
+    assert!(!ceil_mode, "max_pool2d ceil_mode not supported");
+    let stride = stride.unwrap_or(kernel_size);
+    let n = x.shape()[0];
+    let c = x.shape()[1];
+    let h = x.shape()[2];
+    let w = x.shape()[3];
+    assert!(kernel_size > 0, "max_pool2d kernel_size must be > 0");
+    assert!(
+        kernel_size <= h && kernel_size <= w,
+        "max_pool2d kernel_size exceeds input"
+    );
+    assert!(stride > 0, "max_pool2d stride must be > 0");
+    let out_h = (h - kernel_size) / stride + 1;
+    let out_w = (w - kernel_size) / stride + 1;
+
+    let mut out = vec![0.0f32; n * c * out_h * out_w];
+    let mut indices = vec![0usize; out.len()];
+
+    for batch in 0..n {
+        for channel in 0..c {
+            for oh in 0..out_h {
+                for ow in 0..out_w {
+                    let h_start = oh * stride;
+                    let w_start = ow * stride;
+                    let mut max_val = f32::NEG_INFINITY;
+                    let mut max_idx = 0usize;
+                    for kh in 0..kernel_size {
+                        for kw in 0..kernel_size {
+                            let ih = h_start + kh;
+                            let iw = w_start + kw;
+                            let idx = ((batch * c + channel) * h + ih) * w + iw;
+                            let val = x.storage().data[idx];
+                            if val > max_val {
+                                max_val = val;
+                                max_idx = idx;
+                            }
+                        }
+                    }
+                    let out_idx = ((batch * c + channel) * out_h + oh) * out_w + ow;
+                    out[out_idx] = max_val;
+                    indices[out_idx] = max_idx;
+                }
+            }
+        }
+    }
+
+    let requires_grad = x.requires_grad();
+    let grad_fn = if requires_grad {
+        Some(make_max_pool2d_grad(x, indices))
+    } else {
+        None
+    };
+    Tensor::new(out, &[n, c, out_h, out_w], grad_fn, requires_grad)
+}
+
 pub fn sum(x: &Tensor) -> Tensor {
     let total: f32 = x.storage().data.iter().sum();
     let requires_grad = x.requires_grad();
@@ -221,4 +324,91 @@ pub fn nll_loss(log_probs: &Tensor, targets: &Tensor) -> Tensor {
         None
     };
     Tensor::new(vec![loss], &[1], grad_fn, requires_grad)
+}
+
+pub fn batch_norm(
+    x: &Tensor,
+    running_mean: Option<&Tensor>,
+    running_var: Option<&Tensor>,
+    weight: Option<&Tensor>,
+    bias: Option<&Tensor>,
+    training: bool,
+    _momentum: f32,
+    eps: f32,
+) -> Tensor {
+    assert_eq!(x.shape().len(), 4, "batch_norm expects NCHW input");
+    let n = x.shape()[0];
+    let c = x.shape()[1];
+    let h = x.shape()[2];
+    let w = x.shape()[3];
+    let channel_size = (n * h * w) as f32;
+
+    let mut mean = vec![0.0f32; c];
+    let mut var = vec![0.0f32; c];
+
+    if training || running_mean.is_none() || running_var.is_none() {
+        for channel in 0..c {
+            let mut sum = 0.0f32;
+            for batch in 0..n {
+                for idx in 0..(h * w) {
+                    let offset = ((batch * c + channel) * h * w) + idx;
+                    sum += x.storage().data[offset];
+                }
+            }
+            mean[channel] = sum / channel_size;
+        }
+
+        for channel in 0..c {
+            let mut sum = 0.0f32;
+            for batch in 0..n {
+                for idx in 0..(h * w) {
+                    let offset = ((batch * c + channel) * h * w) + idx;
+                    let diff = x.storage().data[offset] - mean[channel];
+                    sum += diff * diff;
+                }
+            }
+            var[channel] = sum / channel_size;
+        }
+    } else {
+        assert_eq!(
+            running_mean.unwrap().numel(),
+            c,
+            "running_mean shape mismatch"
+        );
+        assert_eq!(
+            running_var.unwrap().numel(),
+            c,
+            "running_var shape mismatch"
+        );
+        mean.copy_from_slice(running_mean.unwrap().storage().data.as_slice());
+        var.copy_from_slice(running_var.unwrap().storage().data.as_slice());
+    }
+
+    let mut inv_std = vec![0.0f32; c];
+    for channel in 0..c {
+        inv_std[channel] = 1.0 / (var[channel] + eps).sqrt();
+    }
+
+    let mut out = vec![0.0f32; x.numel()];
+    for batch in 0..n {
+        for channel in 0..c {
+            let weight_val = weight.map(|w| w.storage().data[channel]).unwrap_or(1.0);
+            let bias_val = bias.map(|b| b.storage().data[channel]).unwrap_or(0.0);
+            for idx in 0..(h * w) {
+                let offset = ((batch * c + channel) * h * w) + idx;
+                let normalized = (x.storage().data[offset] - mean[channel]) * inv_std[channel];
+                out[offset] = normalized * weight_val + bias_val;
+            }
+        }
+    }
+
+    let requires_grad = x.requires_grad()
+        || weight.map(|w| w.requires_grad()).unwrap_or(false)
+        || bias.map(|b| b.requires_grad()).unwrap_or(false);
+    let grad_fn = if requires_grad {
+        Some(make_batch_norm_grad(x, weight, bias, mean, inv_std))
+    } else {
+        None
+    };
+    Tensor::new(out, x.shape(), grad_fn, requires_grad)
 }
