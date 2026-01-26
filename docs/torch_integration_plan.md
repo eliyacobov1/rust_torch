@@ -56,6 +56,25 @@ associated test/demo coverage.
 - Extend the parity harness to include a small CNN with batchnorm + pooling and
   a classifier head that exercises the new losses.
 
+### Decision: focus task for the next development cycle
+**Build the "CNN training stack" operator set with full parity coverage.**
+
+**Acceptance criteria**
+- Forward/backward kernels for `max_pool2d`, `batch_norm`, `log_softmax`,
+  `nll_loss` (or fused `cross_entropy`) implemented in Rust.
+- FX lowering routes these ops to the Rust backend and emits clear errors for
+  unsupported tensor layouts or shapes.
+- Parity harness extended with a CNN + batchnorm + pooling model and validated
+  against eager PyTorch for forward and backward checks.
+- Rust tests added for each new op (forward + backward) with numeric tolerances.
+
+**Why this is the next task**
+- It extends the current MNIST demo into a representative production-style
+  training loop without changing infrastructure already delivered (FX runner,
+  parity harness, CI).
+- It de-risks correctness on the most common CNN building blocks before taking
+  on larger API or performance investments.
+
 ## Production readiness roadmap (proposed)
 1. **Operator + autograd coverage for common training stacks**
    - Implement backward ops needed for CNNs and MLPs beyond MNIST (conv2d, maxpool2d,
@@ -76,3 +95,21 @@ associated test/demo coverage.
 6. **Release hardening**
    - CI coverage for `cargo test`, Python binding tests, and compile backend demos;
      document supported platforms and wheel build steps.
+
+## Additional production-grade milestones (proposed)
+1. **API surface stabilization + error taxonomy**
+   - Formalize error types for unsupported ops, layout mismatches, and dtype
+     incompatibilities; document them in Rust + Python.
+   - Add user-facing diagnostics in `rustorch.run_fx` for actionable errors.
+2. **Distributed-friendly state and serialization**
+   - `state_dict`-style save/load with versioned metadata and dtype/layout checks.
+   - Interop with PyTorch checkpoint formats where feasible.
+3. **Optimizer + scheduler parity**
+   - Implement SGD + Adam with weight decay, gradient clipping, and LR scheduling.
+   - Provide parameter group APIs to align with PyTorch ergonomics.
+4. **Performance telemetry**
+   - Add operator-level timing hooks, configurable tracing, and benchmark baselines.
+   - Integrate into `benches/` and document target throughput/latency goals.
+5. **Packaging + release automation**
+   - Multi-platform wheel builds, ABI compatibility checks, and release checklists.
+   - Explicit support matrix for OS/Python/CUDA (even if CUDA is "not yet").

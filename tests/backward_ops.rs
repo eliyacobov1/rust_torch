@@ -219,6 +219,51 @@ fn linear_backward_propagates_to_weights_and_bias() {
 }
 
 #[test]
+fn log_softmax_backward_matches_expected() {
+    let values = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0], &[2, 2], None, true);
+    let out = ops::log_softmax(&values, 1);
+
+    let upstream = vec![0.1, -0.2, 0.3, -0.4];
+    out.grad_fn()
+        .expect("log_softmax grad fn")
+        .backward(&upstream);
+
+    let mut expected = Vec::new();
+    for (row_idx, row) in [[1.0f32, 2.0f32], [3.0f32, 4.0f32]].iter().enumerate() {
+        let max = row[0].max(row[1]);
+        let sum = (row[0] - max).exp() + (row[1] - max).exp();
+        let logsum = max + sum.ln();
+        let log_softmax_row = [row[0] - logsum, row[1] - logsum];
+        let softmax_row = [log_softmax_row[0].exp(), log_softmax_row[1].exp()];
+        let grad_row = [upstream[row_idx * 2], upstream[row_idx * 2 + 1]];
+        let sum_grad = grad_row[0] + grad_row[1];
+        expected.push(grad_row[0] - softmax_row[0] * sum_grad);
+        expected.push(grad_row[1] - softmax_row[1] * sum_grad);
+    }
+
+    let grad_values = values.grad().expect("grad for values");
+    assert_approx_eq(&grad_values.data, expected.as_slice(), 1e-6);
+}
+
+#[test]
+fn nll_loss_backward_matches_expected() {
+    let log_probs = Tensor::from_vec_f32(
+        vec![-0.2, -1.4, -2.1, -1.9, -0.4, -0.7],
+        &[2, 3],
+        None,
+        true,
+    );
+    let targets = Tensor::from_vec_f32(vec![1.0, 2.0], &[2], None, false);
+
+    let loss = ops::nll_loss(&log_probs, &targets);
+    loss.grad_fn().expect("nll_loss grad fn").backward(&[1.0]);
+
+    let grad_log_probs = log_probs.grad().expect("grad for log_probs");
+    let expected = vec![0.0, -0.5, 0.0, 0.0, 0.0, -0.5];
+    assert_approx_eq(&grad_log_probs.data, expected.as_slice(), 1e-6);
+}
+
+#[test]
 fn sum_backward_propagates_scalar_gradient() {
     let x = Tensor::from_vec_f32(vec![1.0, -2.0, 3.0, 4.0], &[2, 2], None, true);
     let out = ops::sum(&x);
