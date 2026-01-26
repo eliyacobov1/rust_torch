@@ -91,3 +91,42 @@ def test_parity_harness_cnn_forward_and_backward() -> None:
     torch.testing.assert_close(eager_out, compiled_out, rtol=1e-4, atol=1e-5)
     torch.testing.assert_close(eager_loss, compiled_loss, rtol=1e-4, atol=1e-5)
     _assert_grad_parity(_collect_param_grads(eager_model), _collect_param_grads(compiled_model))
+
+
+def test_parity_harness_cnn_with_norm_pool_dropout() -> None:
+    torch.manual_seed(23)
+    model = torch.nn.Sequential(
+        torch.nn.Conv2d(1, 8, kernel_size=3, stride=1, padding=1),
+        torch.nn.BatchNorm2d(8),
+        torch.nn.ReLU(),
+        torch.nn.MaxPool2d(kernel_size=2, stride=2),
+        torch.nn.Dropout(p=0.25),
+        torch.nn.Flatten(),
+        torch.nn.Linear(8 * 14 * 14, 10),
+        torch.nn.LogSoftmax(dim=1),
+    )
+    loss_fn = torch.nn.NLLLoss()
+
+    inputs = torch.randn(5, 1, 28, 28)
+    targets = torch.randint(0, 10, (5,))
+
+    eager_model = _clone_module(model)
+    eager_model.train()
+    eager_model.zero_grad(set_to_none=True)
+    torch.manual_seed(101)
+    eager_out = eager_model(inputs)
+    eager_loss = loss_fn(eager_out, targets)
+    eager_loss.backward()
+
+    compiled_model = _clone_module(model)
+    compiled_model.train()
+    compiled_model.zero_grad(set_to_none=True)
+    compiled = torch.compile(compiled_model, backend="rust_backend")
+    torch.manual_seed(101)
+    compiled_out = compiled(inputs)
+    compiled_loss = loss_fn(compiled_out, targets)
+    compiled_loss.backward()
+
+    torch.testing.assert_close(eager_out, compiled_out, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(eager_loss, compiled_loss, rtol=1e-4, atol=1e-5)
+    _assert_grad_parity(_collect_param_grads(eager_model), _collect_param_grads(compiled_model))

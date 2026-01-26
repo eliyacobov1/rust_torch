@@ -35,22 +35,26 @@ associated test/demo coverage.
   with gated dataset downloads (M2).
 - FX runner support and backward op coverage have been expanded to cover core
   ops needed by the demo (M1/M3).
+- Parity harness tests now compare eager vs compiled forward/grad results for
+  representative MLP and CNN models (M4).
 
 ## Next recommended task (post-M4)
-**Build a correctness/parity harness and wire it into CI.**
+**Expand operator + autograd coverage for production training loops.**
 
 **Why this next?**
-- Recent work added more ops and backward coverage, but there is no systematic
-  guardrail to detect regressions or numerical drift across models.
-- A parity harness provides fast feedback on correctness while making operator
-  gaps explicit.
+- Parity harness coverage is in place, but the operator surface is still too
+  narrow for modern training stacks beyond the MNIST demo.
+- Closing the gap on high-value ops (batchnorm, pooling, log-softmax) unlocks
+  more realistic models and provides higher confidence in correctness.
 
 **Scope (significant, production-oriented)**
-- Implement a small model suite (MLP + CNN) that runs in eager PyTorch and
-  `torch.compile(backend="rust_backend")`.
-- Compare forward outputs and gradients with configurable tolerances.
-- Produce a concise report that lists unsupported ops or mismatch hotspots.
-- Add a fast, CPU-only CI job that runs this harness on every PR.
+- Implement forward/backward kernels for `max_pool2d`, `batch_norm`, `dropout`,
+  `log_softmax`, and `nll_loss` (or `cross_entropy` fused paths).
+- Extend FX lowering to route these ops through the Rust backend with clear
+  error messages when unsupported.
+- Add Rust tests in `tests/` for forward/backward parity of new kernels.
+- Extend the parity harness to include a small CNN with batchnorm + pooling and
+  a classifier head that exercises the new losses.
 
 ## Production readiness roadmap (proposed)
 1. **Operator + autograd coverage for common training stacks**
