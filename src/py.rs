@@ -1,9 +1,13 @@
 #![cfg(feature = "python-bindings")]
 
-use crate::{ops, tensor::Tensor};
+use crate::{ops, tensor::Tensor, TorchError};
 use ndarray::ArrayD;
 use numpy::{IntoPyArray, PyArrayDyn, PyReadonlyArrayDyn, PyUntypedArrayMethods};
 use pyo3::prelude::*;
+
+fn map_torch_err(err: TorchError) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(err.to_string())
+}
 
 #[pyclass]
 pub struct PyTensor {
@@ -29,22 +33,22 @@ impl PyTensor {
         })
     }
 
-    fn add(&self, other: &PyTensor) -> PyTensor {
-        PyTensor {
-            inner: ops::add(&self.inner, &other.inner),
-        }
+    fn add(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        ops::try_add(&self.inner, &other.inner)
+            .map(|inner| PyTensor { inner })
+            .map_err(map_torch_err)
     }
 
-    fn mul(&self, other: &PyTensor) -> PyTensor {
-        PyTensor {
-            inner: ops::mul(&self.inner, &other.inner),
-        }
+    fn mul(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        ops::try_mul(&self.inner, &other.inner)
+            .map(|inner| PyTensor { inner })
+            .map_err(map_torch_err)
     }
 
-    fn matmul(&self, other: &PyTensor) -> PyTensor {
-        PyTensor {
-            inner: ops::matmul(&self.inner, &other.inner),
-        }
+    fn matmul(&self, other: &PyTensor) -> PyResult<PyTensor> {
+        ops::try_matmul(&self.inner, &other.inner)
+            .map(|inner| PyTensor { inner })
+            .map_err(map_torch_err)
     }
 
     fn relu(&self) -> PyTensor {
@@ -54,10 +58,10 @@ impl PyTensor {
     }
 
     #[pyo3(signature = (p=0.5, training=true, seed=None))]
-    fn dropout(&self, p: f32, training: bool, seed: Option<u64>) -> PyTensor {
-        PyTensor {
-            inner: ops::dropout(&self.inner, p, training, seed),
-        }
+    fn dropout(&self, p: f32, training: bool, seed: Option<u64>) -> PyResult<PyTensor> {
+        ops::try_dropout(&self.inner, p, training, seed)
+            .map(|inner| PyTensor { inner })
+            .map_err(map_torch_err)
     }
 
     #[pyo3(signature = (kernel_size, stride=None, padding=0, dilation=1, ceil_mode=false))]
@@ -68,17 +72,17 @@ impl PyTensor {
         padding: usize,
         dilation: usize,
         ceil_mode: bool,
-    ) -> PyTensor {
-        PyTensor {
-            inner: ops::max_pool2d(
-                &self.inner,
-                kernel_size,
-                stride,
-                padding,
-                dilation,
-                ceil_mode,
-            ),
-        }
+    ) -> PyResult<PyTensor> {
+        ops::try_max_pool2d(
+            &self.inner,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            ceil_mode,
+        )
+        .map(|inner| PyTensor { inner })
+        .map_err(map_torch_err)
     }
 
     #[pyo3(signature = (running_mean=None, running_var=None, weight=None, bias=None, training=false, momentum=0.1, eps=1e-5))]
@@ -89,27 +93,27 @@ impl PyTensor {
         weight: Option<&PyTensor>,
         bias: Option<&PyTensor>,
         training: bool,
-        momentum: f32,
+        _momentum: f32,
         eps: f32,
-    ) -> PyTensor {
-        PyTensor {
-            inner: ops::batch_norm(
-                &self.inner,
-                running_mean.map(|t| &t.inner),
-                running_var.map(|t| &t.inner),
-                weight.map(|t| &t.inner),
-                bias.map(|t| &t.inner),
-                training,
-                momentum,
-                eps,
-            ),
-        }
+    ) -> PyResult<PyTensor> {
+        ops::try_batch_norm(
+            &self.inner,
+            running_mean.map(|t| &t.inner),
+            running_var.map(|t| &t.inner),
+            weight.map(|t| &t.inner),
+            bias.map(|t| &t.inner),
+            training,
+            eps,
+        )
+        .map(|inner| PyTensor { inner })
+        .map_err(map_torch_err)
     }
 
-    fn reshape(&self, shape: Vec<usize>) -> PyTensor {
-        PyTensor {
-            inner: self.inner.reshape(&shape),
-        }
+    fn reshape(&self, shape: Vec<usize>) -> PyResult<PyTensor> {
+        self.inner
+            .try_reshape(&shape)
+            .map(|inner| PyTensor { inner })
+            .map_err(map_torch_err)
     }
 
     fn shape(&self) -> Vec<usize> {

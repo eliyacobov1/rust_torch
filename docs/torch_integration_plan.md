@@ -39,43 +39,44 @@ associated test/demo coverage.
   representative MLP and CNN models (M4).
 - `log_softmax` + `nll_loss` ops are available to support classification losses
   outside of the MNIST demo path.
+- Forward/backward kernels for `batch_norm`, `dropout`, and `max_pool2d` are now
+  available, expanding CNN training coverage beyond the MNIST baseline.
 
 ## Next recommended task (post-M4)
-**Expand operator + autograd coverage for production CNN training loops.**
+**Harden shape/stride semantics + error taxonomy for production use.**
 
 **Why this next?**
-- Parity harness coverage is in place, but the operator surface is still too
-  narrow for modern training stacks beyond the MNIST demo.
-- Closing the gap on high-value ops (batchnorm, pooling, log-softmax) unlocks
-  more realistic models and provides higher confidence in correctness.
+- Operator coverage is broader now, but real-world models will hit edge cases
+  in layouts, broadcasting, and dynamic shapes.
+- Formalizing tensor layout semantics and error reporting reduces debugging
+  time and prevents silent correctness issues.
 
 **Scope (significant, production-oriented)**
-- Implement forward/backward kernels for `max_pool2d`, `batch_norm`, and
-  `dropout`, plus any missing fused `cross_entropy` paths.
-- Extend FX lowering to route these ops through the Rust backend with clear
-  error messages when unsupported.
-- Add Rust tests in `tests/` for forward/backward parity of new kernels.
-- Extend the parity harness to include a small CNN with batchnorm + pooling and
-  a classifier head that exercises the new losses.
+- Introduce explicit shape/stride validation in core tensor ops and FX lowering.
+- Add contiguous/strided tensor semantics with clear fallbacks or errors for
+  unsupported layouts.
+- Define a user-facing error taxonomy (unsupported op, layout mismatch, dtype
+  incompatibility) and propagate it through `rustorch.run_fx`.
+- Expand Rust and Python parity tests to cover strided tensors, broadcasting,
+  and dynamic shapes in compiled graphs.
 
 ### Decision: focus task for the next development cycle
-**Build the "CNN training stack" operator set with full parity coverage.**
+**Implement robust shape/stride semantics with a clear error taxonomy.**
 
 **Acceptance criteria**
-- Forward/backward kernels for `max_pool2d`, `batch_norm`, and `dropout`
-  implemented in Rust, along with any missing fused `cross_entropy` paths.
-- FX lowering routes these ops to the Rust backend and emits clear errors for
-  unsupported tensor layouts or shapes.
-- Parity harness extended with a CNN + batchnorm + pooling model and validated
-  against eager PyTorch for forward and backward checks.
-- Rust tests added for each new op (forward + backward) with numeric tolerances.
+- Tensor ops validate shapes/strides and return structured errors for unsupported
+  layouts, dtypes, or dynamic shapes.
+- FX lowering emits actionable errors and documents supported layout/dtype
+  combinations for each op.
+- Parity harness and Rust tests include strided tensor, broadcasting, and
+  dynamic-shape scenarios (forward + backward).
+- Documentation updated to describe layout assumptions and failure modes.
 
 **Why this is the next task**
-- It extends the current MNIST demo into a representative production-style
-  training loop without changing infrastructure already delivered (FX runner,
-  parity harness, CI).
-- It de-risks correctness on the most common CNN building blocks before taking
-  on larger API or performance investments.
+- It de-risks correctness as operator coverage expands, ensuring the backend
+  fails fast with useful diagnostics instead of silent miscomputations.
+- It lays groundwork for serialization, optimizer state, and future performance
+  work by clarifying tensor semantics.
 
 ## Production readiness roadmap (proposed)
 1. **Operator + autograd coverage for common training stacks**

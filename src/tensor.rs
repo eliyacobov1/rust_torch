@@ -4,6 +4,7 @@ use std::ops::{Add, Index, IndexMut, Mul};
 use std::sync::{Arc, Mutex};
 
 use crate::autograd::{make_broadcast_grad, make_reshape_grad, Grad, GradFn};
+use crate::error::{Result, TorchError};
 use crate::storage::Storage;
 
 pub type GradFnRef = Arc<dyn GradFn + Send + Sync>;
@@ -146,18 +147,27 @@ impl Tensor {
     }
 
     pub fn broadcast_shape(a: &[usize], b: &[usize]) -> Vec<usize> {
+        Self::try_broadcast_shape(a, b, "broadcast_shape")
+            .expect("broadcast_shape: shapes not broadcastable")
+    }
+
+    pub fn try_broadcast_shape(a: &[usize], b: &[usize], op: &'static str) -> Result<Vec<usize>> {
         let mut out = Vec::new();
         let max_len = a.len().max(b.len());
         for i in 0..max_len {
             let ad = *a.get(a.len().wrapping_sub(i + 1)).unwrap_or(&1);
             let bd = *b.get(b.len().wrapping_sub(i + 1)).unwrap_or(&1);
             if ad != bd && ad != 1 && bd != 1 {
-                panic!("Shapes not broadcastable: {:?} vs {:?}", a, b);
+                return Err(TorchError::BroadcastMismatch {
+                    op,
+                    lhs: a.to_vec(),
+                    rhs: b.to_vec(),
+                });
             }
             out.push(ad.max(bd));
         }
         out.reverse();
-        out
+        Ok(out)
     }
 
     pub fn set_grad_fn(&mut self, grad_fn: Option<GradFnRef>) {
@@ -167,16 +177,33 @@ impl Tensor {
     }
 
     pub fn broadcast_to(&self, target_shape: &[usize]) -> Tensor {
+        self.try_broadcast_to(target_shape, "broadcast_to")
+            .expect("broadcast_to: invalid target shape")
+    }
+
+    pub fn try_broadcast_to(&self, target_shape: &[usize], op: &'static str) -> Result<Tensor> {
         // TODO: broadcast optimizations (no copy, etc)
         let src_shape = self.shape();
-        assert!(
-            target_shape.len() >= src_shape.len(),
-            "Cannot broadcast to fewer dimensions"
-        );
+        if target_shape.len() < src_shape.len() {
+            return Err(TorchError::InvalidArgument {
+                op,
+                msg: "cannot broadcast to fewer dimensions".to_string(),
+            });
+        }
 
         // Align dimensions (pad with 1s on the left)
         let mut src_aligned = vec![1; target_shape.len()];
         src_aligned[(target_shape.len() - src_shape.len())..].copy_from_slice(src_shape);
+
+        for (src_dim, target_dim) in src_aligned.iter().zip(target_shape.iter()) {
+            if *src_dim != 1 && src_dim != target_dim {
+                return Err(TorchError::BroadcastMismatch {
+                    op,
+                    lhs: src_shape.to_vec(),
+                    rhs: target_shape.to_vec(),
+                });
+            }
+        }
 
         // Compute total element count
         let out_len: usize = target_shape.iter().product();
@@ -241,16 +268,34 @@ impl Tensor {
         } else {
             None
         };
-        Self::new(out_data, target_shape, grad_fn, self.requires_grad())
+        Ok(Self::new(
+            out_data,
+            target_shape,
+            grad_fn,
+            self.requires_grad(),
+        ))
     }
 
     pub fn reshape(&self, new_shape: &[usize]) -> Self {
+        self.try_reshape(new_shape)
+            .expect("reshape: number of elements must remain the same")
+    }
+
+    pub fn try_reshape(&self, new_shape: &[usize]) -> Result<Self> {
         let old_numel: usize = self.shape().iter().product();
         let new_numel: usize = new_shape.iter().product();
-        assert_eq!(
-            old_numel, new_numel,
-            "Cannot reshape: number of elements must remain the same"
-        );
+        if old_numel != new_numel {
+            return Err(TorchError::InvalidArgument {
+                op: "reshape",
+                msg: format!(
+                    "cannot reshape from {:?} (numel={}) to {:?} (numel={})",
+                    self.shape(),
+                    old_numel,
+                    new_shape,
+                    new_numel
+                ),
+            });
+        }
 
         let grad_fn = if self.requires_grad() {
             Some(make_reshape_grad(self, new_shape))
@@ -267,9 +312,9 @@ impl Tensor {
             grad_fn,
             shape: new_shape.to_vec(),
         };
-        Tensor {
+        Ok(Tensor {
             inner: Arc::new(inner),
-        }
+        })
     }
 
     pub(crate) fn inner(&self) -> &Arc<TensorInner> {
