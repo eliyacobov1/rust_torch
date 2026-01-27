@@ -5,6 +5,7 @@ use crate::autograd::{
     make_matmul_grad, make_max_pool2d_grad, make_mse_loss_grad, make_mul_grad, make_nll_loss_grad,
     make_relu_grad, make_sum_grad,
 };
+use crate::error::{Result, TorchError};
 use crate::tensor::Tensor;
 use crate::tensor::TensorInner;
 use kernels::{add_kernel, matmul_kernel, mul_kernel};
@@ -13,11 +14,15 @@ use rand::{Rng, SeedableRng};
 use std::sync::Arc;
 
 pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
-    let shape = Tensor::broadcast_shape(a.shape(), b.shape());
+    try_add(a, b).expect("add: invalid inputs")
+}
+
+pub fn try_add(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    let shape = Tensor::try_broadcast_shape(a.shape(), b.shape(), "add")?;
 
     // Materialize broadcasted views (copy version you already wrote)
-    let a_b = Tensor::broadcast_to(a, &shape);
-    let b_b = Tensor::broadcast_to(b, &shape);
+    let a_b = a.try_broadcast_to(&shape, "add")?;
+    let b_b = b.try_broadcast_to(&shape, "add")?;
     let result_data = add_kernel(a_b.storage().data.as_slice(), b_b.storage().data.as_slice());
 
     let requires_grad = a.requires_grad() || b.requires_grad();
@@ -28,19 +33,38 @@ pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
     };
     let out = Tensor::new(result_data, &shape, grad_fn, requires_grad);
 
-    out
+    Ok(out)
 }
 
 pub fn matmul(a: &Tensor, b: &Tensor) -> Tensor {
+    try_matmul(a, b).expect("matmul: invalid inputs")
+}
+
+pub fn try_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let requires_grad = a.requires_grad() || b.requires_grad();
 
     // Compute broadcasted batch shape
+    if a.shape().len() < 2 || b.shape().len() < 2 {
+        return Err(TorchError::InvalidArgument {
+            op: "matmul",
+            msg: "matmul expects tensors with at least 2 dimensions".to_string(),
+        });
+    }
     let a_batch = a.batch_dims();
     let b_batch = b.batch_dims();
-    let batch_shape = Tensor::broadcast_shape(a_batch, b_batch);
+    let batch_shape = Tensor::try_broadcast_shape(a_batch, b_batch, "matmul")?;
     let [m, k1] = a.matrix_dims();
     let [k2, n] = b.matrix_dims();
-    assert_eq!(k1, k2);
+    if k1 != k2 {
+        return Err(TorchError::InvalidArgument {
+            op: "matmul",
+            msg: format!(
+                "inner dimensions must match (lhs={:?}, rhs={:?})",
+                [m, k1],
+                [k2, n]
+            ),
+        });
+    }
 
     let grad_fn = if requires_grad {
         Some(make_matmul_grad(a, b))
@@ -67,16 +91,25 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Tensor {
         out_mat_buf.copy_from_slice(&result_data);
     }
 
-    out
+    Ok(out)
 }
 
 pub fn mse_loss(predictions: &Tensor, targets: &Tensor) -> Tensor {
+    try_mse_loss(predictions, targets).expect("mse_loss: invalid inputs")
+}
+
+pub fn try_mse_loss(predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
     // Mean Squared Error: (1/N) * sum((predictions - targets)^2)
-    assert_eq!(
-        predictions.shape(),
-        targets.shape(),
-        "Predictions and targets must have the same shape"
-    );
+    if predictions.shape() != targets.shape() {
+        return Err(TorchError::InvalidArgument {
+            op: "mse_loss",
+            msg: format!(
+                "predictions and targets must have the same shape (predictions={:?}, targets={:?})",
+                predictions.shape(),
+                targets.shape()
+            ),
+        });
+    }
 
     let requires_grad = predictions.requires_grad() || targets.requires_grad();
     let n = predictions.numel() as f32;
@@ -100,14 +133,18 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor) -> Tensor {
         None
     };
 
-    Tensor::new(vec![loss], &[1], grad_fn, requires_grad)
+    Ok(Tensor::new(vec![loss], &[1], grad_fn, requires_grad))
 }
 
 pub fn mul(a: &Tensor, b: &Tensor) -> Tensor {
-    let shape = Tensor::broadcast_shape(a.shape(), b.shape());
+    try_mul(a, b).expect("mul: invalid inputs")
+}
 
-    let a_b = Tensor::broadcast_to(a, &shape);
-    let b_b = Tensor::broadcast_to(b, &shape);
+pub fn try_mul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    let shape = Tensor::try_broadcast_shape(a.shape(), b.shape(), "mul")?;
+
+    let a_b = a.try_broadcast_to(&shape, "mul")?;
+    let b_b = b.try_broadcast_to(&shape, "mul")?;
     let result_data = mul_kernel(a_b.storage().data.as_slice(), b_b.storage().data.as_slice());
 
     let requires_grad = a.requires_grad() || b.requires_grad();
@@ -116,7 +153,7 @@ pub fn mul(a: &Tensor, b: &Tensor) -> Tensor {
     } else {
         None
     };
-    Tensor::new(result_data, &shape, grad_fn, requires_grad)
+    Ok(Tensor::new(result_data, &shape, grad_fn, requires_grad))
 }
 
 pub fn relu(x: &Tensor) -> Tensor {
@@ -131,7 +168,16 @@ pub fn relu(x: &Tensor) -> Tensor {
 }
 
 pub fn dropout(x: &Tensor, p: f32, training: bool, seed: Option<u64>) -> Tensor {
-    assert!((0.0..1.0).contains(&p), "dropout p must be in [0, 1)");
+    try_dropout(x, p, training, seed).expect("dropout: invalid inputs")
+}
+
+pub fn try_dropout(x: &Tensor, p: f32, training: bool, seed: Option<u64>) -> Result<Tensor> {
+    if !(0.0..1.0).contains(&p) {
+        return Err(TorchError::InvalidArgument {
+            op: "dropout",
+            msg: "dropout p must be in [0, 1)".to_string(),
+        });
+    }
     let requires_grad = x.requires_grad();
     if !training {
         let grad_fn = if requires_grad {
@@ -139,7 +185,12 @@ pub fn dropout(x: &Tensor, p: f32, training: bool, seed: Option<u64>) -> Tensor 
         } else {
             None
         };
-        return Tensor::new(x.storage().data.clone(), x.shape(), grad_fn, requires_grad);
+        return Ok(Tensor::new(
+            x.storage().data.clone(),
+            x.shape(),
+            grad_fn,
+            requires_grad,
+        ));
     }
 
     let mut rng = match seed {
@@ -161,25 +212,34 @@ pub fn dropout(x: &Tensor, p: f32, training: bool, seed: Option<u64>) -> Tensor 
     } else {
         None
     };
-    Tensor::new(out, x.shape(), grad_fn, requires_grad)
+    Ok(Tensor::new(out, x.shape(), grad_fn, requires_grad))
 }
 
-fn normalize_dim(dim: isize, rank: usize) -> usize {
+fn try_normalize_dim(dim: isize, rank: usize, op: &'static str) -> Result<usize> {
     let mut dim = dim;
     if dim < 0 {
         dim += rank as isize;
     }
     if dim < 0 || dim as usize >= rank {
-        panic!("log_softmax: dim {} out of range for rank {}", dim, rank);
+        return Err(TorchError::InvalidDim { op, dim, rank });
     }
-    dim as usize
+    Ok(dim as usize)
 }
 
 pub fn log_softmax(x: &Tensor, dim: isize) -> Tensor {
+    try_log_softmax(x, dim).expect("log_softmax: invalid inputs")
+}
+
+pub fn try_log_softmax(x: &Tensor, dim: isize) -> Result<Tensor> {
     let shape = x.shape();
     let rank = shape.len();
-    assert!(rank > 0, "log_softmax requires a non-empty shape");
-    let dim = normalize_dim(dim, rank);
+    if rank == 0 {
+        return Err(TorchError::InvalidArgument {
+            op: "log_softmax",
+            msg: "log_softmax requires a non-empty shape".to_string(),
+        });
+    }
+    let dim = try_normalize_dim(dim, rank, "log_softmax")?;
     let dim_size = shape[dim];
     let inner_size: usize = shape[dim + 1..].iter().product();
     let outer_size: usize = shape[..dim].iter().product();
@@ -211,7 +271,7 @@ pub fn log_softmax(x: &Tensor, dim: isize) -> Tensor {
         let grad_fn = Some(make_log_softmax_grad(x, out, dim, shape));
         output.set_grad_fn(grad_fn);
     }
-    output
+    Ok(output)
 }
 
 pub fn max_pool2d(
@@ -222,21 +282,65 @@ pub fn max_pool2d(
     dilation: usize,
     ceil_mode: bool,
 ) -> Tensor {
-    assert_eq!(x.shape().len(), 4, "max_pool2d expects NCHW input");
-    assert_eq!(padding, 0, "max_pool2d padding not supported");
-    assert_eq!(dilation, 1, "max_pool2d dilation not supported");
-    assert!(!ceil_mode, "max_pool2d ceil_mode not supported");
+    try_max_pool2d(x, kernel_size, stride, padding, dilation, ceil_mode)
+        .expect("max_pool2d: invalid inputs")
+}
+
+pub fn try_max_pool2d(
+    x: &Tensor,
+    kernel_size: usize,
+    stride: Option<usize>,
+    padding: usize,
+    dilation: usize,
+    ceil_mode: bool,
+) -> Result<Tensor> {
+    if x.shape().len() != 4 {
+        return Err(TorchError::InvalidArgument {
+            op: "max_pool2d",
+            msg: "max_pool2d expects NCHW input".to_string(),
+        });
+    }
+    if padding != 0 {
+        return Err(TorchError::InvalidArgument {
+            op: "max_pool2d",
+            msg: "max_pool2d padding not supported".to_string(),
+        });
+    }
+    if dilation != 1 {
+        return Err(TorchError::InvalidArgument {
+            op: "max_pool2d",
+            msg: "max_pool2d dilation not supported".to_string(),
+        });
+    }
+    if ceil_mode {
+        return Err(TorchError::InvalidArgument {
+            op: "max_pool2d",
+            msg: "max_pool2d ceil_mode not supported".to_string(),
+        });
+    }
     let stride = stride.unwrap_or(kernel_size);
     let n = x.shape()[0];
     let c = x.shape()[1];
     let h = x.shape()[2];
     let w = x.shape()[3];
-    assert!(kernel_size > 0, "max_pool2d kernel_size must be > 0");
-    assert!(
-        kernel_size <= h && kernel_size <= w,
-        "max_pool2d kernel_size exceeds input"
-    );
-    assert!(stride > 0, "max_pool2d stride must be > 0");
+    if kernel_size == 0 {
+        return Err(TorchError::InvalidArgument {
+            op: "max_pool2d",
+            msg: "max_pool2d kernel_size must be > 0".to_string(),
+        });
+    }
+    if kernel_size > h || kernel_size > w {
+        return Err(TorchError::InvalidArgument {
+            op: "max_pool2d",
+            msg: "max_pool2d kernel_size exceeds input".to_string(),
+        });
+    }
+    if stride == 0 {
+        return Err(TorchError::InvalidArgument {
+            op: "max_pool2d",
+            msg: "max_pool2d stride must be > 0".to_string(),
+        });
+    }
     let out_h = (h - kernel_size) / stride + 1;
     let out_w = (w - kernel_size) / stride + 1;
 
@@ -277,7 +381,12 @@ pub fn max_pool2d(
     } else {
         None
     };
-    Tensor::new(out, &[n, c, out_h, out_w], grad_fn, requires_grad)
+    Ok(Tensor::new(
+        out,
+        &[n, c, out_h, out_w],
+        grad_fn,
+        requires_grad,
+    ))
 }
 
 pub fn sum(x: &Tensor) -> Tensor {
@@ -298,20 +407,35 @@ pub fn linear(x: &Tensor, w: &Tensor, b: &Tensor) -> Tensor {
 }
 
 pub fn nll_loss(log_probs: &Tensor, targets: &Tensor) -> Tensor {
+    try_nll_loss(log_probs, targets).expect("nll_loss: invalid inputs")
+}
+
+pub fn try_nll_loss(log_probs: &Tensor, targets: &Tensor) -> Result<Tensor> {
     let shape = log_probs.shape();
-    assert_eq!(shape.len(), 2, "nll_loss expects [batch, classes] input");
+    if shape.len() != 2 {
+        return Err(TorchError::InvalidArgument {
+            op: "nll_loss",
+            msg: "nll_loss expects [batch, classes] input".to_string(),
+        });
+    }
     let batch = shape[0];
     let classes = shape[1];
-    assert_eq!(targets.shape(), &[batch], "targets must match batch size");
+    if targets.shape() != &[batch] {
+        return Err(TorchError::InvalidArgument {
+            op: "nll_loss",
+            msg: "targets must match batch size".to_string(),
+        });
+    }
 
     let mut loss = 0.0f32;
     for i in 0..batch {
         let target = targets.storage().data[i] as isize;
-        assert!(
-            target >= 0 && (target as usize) < classes,
-            "target index out of range: {}",
-            target
-        );
+        if target < 0 || (target as usize) >= classes {
+            return Err(TorchError::InvalidArgument {
+                op: "nll_loss",
+                msg: format!("target index out of range: {}", target),
+            });
+        }
         let idx = i * classes + target as usize;
         loss -= log_probs.storage().data[idx];
     }
@@ -323,7 +447,7 @@ pub fn nll_loss(log_probs: &Tensor, targets: &Tensor) -> Tensor {
     } else {
         None
     };
-    Tensor::new(vec![loss], &[1], grad_fn, requires_grad)
+    Ok(Tensor::new(vec![loss], &[1], grad_fn, requires_grad))
 }
 
 pub fn batch_norm(
@@ -336,12 +460,46 @@ pub fn batch_norm(
     _momentum: f32,
     eps: f32,
 ) -> Tensor {
-    assert_eq!(x.shape().len(), 4, "batch_norm expects NCHW input");
+    try_batch_norm(x, running_mean, running_var, weight, bias, training, eps)
+        .expect("batch_norm: invalid inputs")
+}
+
+pub fn try_batch_norm(
+    x: &Tensor,
+    running_mean: Option<&Tensor>,
+    running_var: Option<&Tensor>,
+    weight: Option<&Tensor>,
+    bias: Option<&Tensor>,
+    training: bool,
+    eps: f32,
+) -> Result<Tensor> {
+    if x.shape().len() != 4 {
+        return Err(TorchError::InvalidArgument {
+            op: "batch_norm",
+            msg: "batch_norm expects NCHW input".to_string(),
+        });
+    }
     let n = x.shape()[0];
     let c = x.shape()[1];
     let h = x.shape()[2];
     let w = x.shape()[3];
     let channel_size = (n * h * w) as f32;
+
+    for (name, tensor) in [
+        ("running_mean", running_mean),
+        ("running_var", running_var),
+        ("weight", weight),
+        ("bias", bias),
+    ] {
+        if let Some(tensor) = tensor {
+            if tensor.shape() != &[c] {
+                return Err(TorchError::InvalidArgument {
+                    op: "batch_norm",
+                    msg: format!("{name} must have shape [{c}]"),
+                });
+            }
+        }
+    }
 
     let mut mean = vec![0.0f32; c];
     let mut var = vec![0.0f32; c];
@@ -370,16 +528,12 @@ pub fn batch_norm(
             var[channel] = sum / channel_size;
         }
     } else {
-        assert_eq!(
-            running_mean.unwrap().numel(),
-            c,
-            "running_mean shape mismatch"
-        );
-        assert_eq!(
-            running_var.unwrap().numel(),
-            c,
-            "running_var shape mismatch"
-        );
+        if running_mean.is_none() || running_var.is_none() {
+            return Err(TorchError::InvalidArgument {
+                op: "batch_norm",
+                msg: "running_mean and running_var required when training is false".to_string(),
+            });
+        }
         mean.copy_from_slice(running_mean.unwrap().storage().data.as_slice());
         var.copy_from_slice(running_var.unwrap().storage().data.as_slice());
     }
@@ -410,5 +564,5 @@ pub fn batch_norm(
     } else {
         None
     };
-    Tensor::new(out, x.shape(), grad_fn, requires_grad)
+    Ok(Tensor::new(out, x.shape(), grad_fn, requires_grad))
 }
