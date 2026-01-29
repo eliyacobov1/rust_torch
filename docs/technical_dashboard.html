@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rustorch Neural Diagnostics Dashboard</title>
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&display=swap");
+
+    :root {
+      color-scheme: dark;
+      --bg: #0b0f13;
+      --panel: #111922;
+      --panel-alt: #0f141a;
+      --border: #243040;
+      --cyan: #4ce3ff;
+      --cyan-soft: rgba(76, 227, 255, 0.12);
+      --green: #7dffb3;
+      --orange: #f6b14b;
+      --pink: #ff7bdc;
+      --text: #d7e6f5;
+      --muted: #8aa0b8;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top, #131b24, #0b0f13 55%);
+      color: var(--text);
+      font-family: "Fira Code", monospace;
+    }
+
+    .dashboard {
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) minmax(320px, 1.2fr) minmax(320px, 1.2fr);
+      gap: 20px;
+      padding: 24px;
+      min-height: 100vh;
+    }
+
+    .panel {
+      background: linear-gradient(180deg, rgba(16, 23, 32, 0.92), rgba(9, 13, 18, 0.96));
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+
+    .panel-title {
+      font-size: 15px;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: var(--cyan);
+    }
+
+    .badge {
+      border: 1px solid var(--cyan);
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      color: var(--cyan);
+      background: rgba(76, 227, 255, 0.08);
+    }
+
+    .input-sandbox {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .canvas-wrap {
+      background: #020304;
+      border: 1px solid #1f2a35;
+      border-radius: 12px;
+      padding: 12px;
+      display: grid;
+      place-items: center;
+    }
+
+    #mnist-canvas {
+      width: 280px;
+      height: 280px;
+      border: 1px solid #2a3c4f;
+      image-rendering: pixelated;
+      background: #000;
+      cursor: crosshair;
+    }
+
+    .metrics-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .metric-card {
+      padding: 12px;
+      border-radius: 10px;
+      background: var(--panel-alt);
+      border: 1px solid #1b2430;
+    }
+
+    .metric-label {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .metric-value {
+      font-size: 20px;
+      color: var(--green);
+      margin-top: 6px;
+    }
+
+    .stream-log {
+      font-size: 11px;
+      line-height: 1.5;
+      color: #90a5ba;
+      background: #0b1117;
+      border: 1px solid #1b2430;
+      border-radius: 10px;
+      padding: 10px;
+      max-height: 140px;
+      overflow: auto;
+    }
+
+    .pipeline {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .layer-node {
+      padding: 12px 16px;
+      border-radius: 12px;
+      border: 1px solid #263243;
+      background: rgba(14, 20, 28, 0.9);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .layer-node.active {
+      border-color: var(--cyan);
+      box-shadow: 0 0 18px rgba(76, 227, 255, 0.3);
+      background: rgba(15, 29, 39, 0.95);
+    }
+
+    .layer-name {
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .layer-meta {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+
+    .inspector {
+      margin-top: 18px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .heatmap {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 6px;
+    }
+
+    .heatmap div {
+      padding-top: 100%;
+      border-radius: 6px;
+      background: rgba(76, 227, 255, 0.16);
+      border: 1px solid rgba(76, 227, 255, 0.12);
+    }
+
+    .telemetry {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .telemetry-card {
+      background: #0d141c;
+      border: 1px solid #1f2a35;
+      border-radius: 10px;
+      padding: 10px;
+    }
+
+    .telemetry-card h4 {
+      margin: 0;
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 500;
+    }
+
+    .telemetry-card p {
+      margin: 8px 0 0;
+      font-size: 18px;
+      color: var(--cyan);
+    }
+
+    .hud {
+      display: grid;
+      gap: 18px;
+    }
+
+    .prediction {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #0b1219;
+      border: 1px solid #1f2a35;
+      border-radius: 12px;
+      padding: 12px 16px;
+    }
+
+    .prediction-digit {
+      font-size: 48px;
+      color: var(--cyan);
+      text-shadow: 0 0 20px rgba(76, 227, 255, 0.6);
+    }
+
+    .prediction-meta {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .probabilities {
+      display: grid;
+      gap: 8px;
+    }
+
+    .prob-row {
+      display: grid;
+      grid-template-columns: 24px 1fr 40px;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .prob-bar {
+      height: 8px;
+      border-radius: 999px;
+      background: #101923;
+      overflow: hidden;
+      border: 1px solid #1d2733;
+    }
+
+    .prob-bar span {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, #4ce3ff, #7dffb3);
+      border-radius: inherit;
+      width: 0%;
+      transition: width 0.3s ease;
+    }
+
+    .artifact-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .artifact {
+      padding: 10px;
+      border-radius: 10px;
+      background: #0b1117;
+      border: 1px solid #1f2a35;
+    }
+
+    .artifact h4 {
+      margin: 0 0 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .artifact-visual {
+      height: 80px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, rgba(76, 227, 255, 0.15), rgba(255, 123, 220, 0.15));
+      border: 1px solid rgba(76, 227, 255, 0.2);
+    }
+
+    .footer-note {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 12px;
+    }
+
+    .system-status {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 8px;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--green);
+      box-shadow: 0 0 10px rgba(125, 255, 179, 0.6);
+    }
+
+    .status-dot[data-state="connecting"] {
+      background: var(--orange);
+      box-shadow: 0 0 10px rgba(246, 177, 75, 0.6);
+    }
+
+    .status-dot[data-state="disconnected"] {
+      background: #f46f6f;
+      box-shadow: 0 0 10px rgba(244, 111, 111, 0.6);
+    }
+
+    .status-dot[data-state="idle"] {
+      background: #6f879c;
+      box-shadow: 0 0 10px rgba(111, 135, 156, 0.5);
+    }
+
+    .backend-note {
+      font-size: 10px;
+      color: #7b90a6;
+      margin-top: 6px;
+    }
+  </style>
+</head>
+<body>
+  <main class="dashboard">
+    <section class="panel input-sandbox">
+      <div class="panel-header">
+        <div class="panel-title">Input Sandbox</div>
+        <div class="badge">MNIST 28x28</div>
+      </div>
+      <div class="canvas-wrap">
+        <canvas id="mnist-canvas" width="28" height="28" aria-label="MNIST drawing canvas"></canvas>
+      </div>
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-label">Tensor Conversion Rate</div>
+          <div class="metric-value" id="tensor-rate" data-metric="tensor-rate">0.00 MB/s</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Active Pixels</div>
+          <div class="metric-value" id="active-pixels" data-metric="active-pixels">0 / 784</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Tensor Stream</div>
+          <div class="stream-log" id="tensor-stream" data-stream="tensor-sample"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div class="panel-title">Neural Trace</div>
+        <div class="badge">Backend Pipeline</div>
+      </div>
+      <div class="pipeline" id="pipeline" data-pipeline="layers">
+        <div class="layer-node active" data-layer="Conv2D" data-shape="1x8x26x26" data-layer-id="conv2d_0">
+          <div class="layer-name">Conv2D</div>
+          <div class="layer-meta">Kernel 3x3 · Stride 1 · Output 8x26x26</div>
+        </div>
+        <div class="layer-node" data-layer="ReLU" data-shape="1x8x26x26" data-layer-id="relu_1">
+          <div class="layer-name">ReLU</div>
+          <div class="layer-meta">Activation · Threshold 0</div>
+        </div>
+        <div class="layer-node" data-layer="Linear" data-shape="1x10" data-layer-id="linear_2">
+          <div class="layer-name">Linear</div>
+          <div class="layer-meta">Dense · 5408 → 10</div>
+        </div>
+      </div>
+      <div class="inspector">
+        <div class="panel-header">
+          <div class="panel-title">Backend Inspector</div>
+          <div class="badge" id="layer-shape" data-layer-shape>1x8x26x26</div>
+        </div>
+        <div>
+          <div class="metric-label">Intermediate Activations</div>
+          <div class="heatmap" id="heatmap" data-activation-heatmap></div>
+        </div>
+        <div class="telemetry">
+          <div class="telemetry-card">
+            <h4>Latency (µs)</h4>
+            <p id="latency" data-telemetry="latency-us">18.4</p>
+          </div>
+          <div class="telemetry-card">
+            <h4>Memory Overhead</h4>
+            <p id="memory" data-telemetry="memory-mb">1.6 MB</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div class="panel-title">Artifact &amp; Logic Output</div>
+        <div class="badge">Rust Backend</div>
+      </div>
+      <div class="hud">
+        <div class="prediction">
+          <div>
+            <div class="prediction-meta">Classification HUD</div>
+            <div class="prediction-digit" id="prediction-digit" data-prediction-digit>8</div>
+          </div>
+          <div class="prediction-meta" id="prediction-confidence" data-prediction-confidence>
+            Confidence 92.1%
+          </div>
+        </div>
+        <div class="probabilities" id="probabilities" data-probability-bars></div>
+      </div>
+      <div class="panel-header" style="margin-top: 18px;">
+        <div class="panel-title">System Artifacts</div>
+        <div class="badge">Saliency &amp; Weights</div>
+      </div>
+      <div class="artifact-grid">
+        <div class="artifact">
+          <h4>Saliency Map · Layer 1</h4>
+          <div class="artifact-visual" data-artifact="saliency-l1"></div>
+        </div>
+        <div class="artifact">
+          <h4>Saliency Map · Layer 3</h4>
+          <div class="artifact-visual" data-artifact="saliency-l3"></div>
+        </div>
+        <div class="artifact">
+          <h4>Weights Distribution · Conv2D</h4>
+          <div class="artifact-visual" data-artifact="weights-conv2d"></div>
+        </div>
+        <div class="artifact">
+          <h4>Weights Distribution · Linear</h4>
+          <div class="artifact-visual" data-artifact="weights-linear"></div>
+        </div>
+      </div>
+      <div class="footer-note">
+        Telemetry values update in real-time when layers are selected.
+        <span class="system-status">
+          <span class="status-dot" aria-hidden="true" data-status-dot data-state="idle"></span>
+          Rust backend socket: <span id="backend-status" data-backend-status>idle</span>
+        </span>
+        <div class="backend-note">
+          Backend bridge available via <code>window.RustorchDashboard</code> or WebSocket payloads.
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const canvas = document.getElementById("mnist-canvas");
+    const ctx = canvas.getContext("2d");
+    const tensorRate = document.getElementById("tensor-rate");
+    const activePixels = document.getElementById("active-pixels");
+    const tensorStream = document.getElementById("tensor-stream");
+    const predictionDigit = document.getElementById("prediction-digit");
+    const predictionConfidence = document.getElementById("prediction-confidence");
+    const probabilities = document.getElementById("probabilities");
+    const heatmap = document.getElementById("heatmap");
+    const latency = document.getElementById("latency");
+    const memory = document.getElementById("memory");
+    const layerShape = document.getElementById("layer-shape");
+    const backendStatus = document.getElementById("backend-status");
+    const statusDot = document.querySelector("[data-status-dot]");
+
+    const pixelData = new Array(28 * 28).fill(0);
+    let isDrawing = false;
+
+    const seedHeatmap = () => {
+      heatmap.innerHTML = "";
+      for (let i = 0; i < 32; i += 1) {
+        const cell = document.createElement("div");
+        cell.style.background = `rgba(76, 227, 255, ${0.15 + Math.random() * 0.6})`;
+        heatmap.appendChild(cell);
+      }
+    };
+
+    const updateProbabilities = (values) => {
+      probabilities.innerHTML = "";
+      const total = values.reduce((sum, value) => sum + value, 0) || 1;
+      const normalized = values.map((value) => value / total);
+      const maxIndex = normalized.indexOf(Math.max(...normalized));
+      predictionDigit.textContent = String(maxIndex);
+      predictionConfidence.textContent = `Confidence ${(normalized[maxIndex] * 100).toFixed(1)}%`;
+
+      normalized.forEach((value, index) => {
+        const row = document.createElement("div");
+        row.className = "prob-row";
+        row.innerHTML = `
+          <span>${index}</span>
+          <div class="prob-bar"><span style="width:${(value * 100).toFixed(0)}%"></span></div>
+          <span>${(value * 100).toFixed(1)}%</span>
+        `;
+        probabilities.appendChild(row);
+      });
+    };
+
+    const updateTensorMetrics = () => {
+      const active = pixelData.filter((value) => value > 0).length;
+      activePixels.textContent = `${active} / 784`;
+      const throughput = (active / 784) * 1.6 + Math.random() * 0.2;
+      tensorRate.textContent = `${throughput.toFixed(2)} MB/s`;
+      const sample = pixelData.slice(0, 64).map((v) => v.toFixed(2));
+      tensorStream.textContent = `tensor([${sample.join(", ")} ...])`;
+    };
+
+    const draw = (x, y) => {
+      const index = y * 28 + x;
+      pixelData[index] = 1;
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(x, y, 1, 1);
+    };
+
+    const clearCanvas = () => {
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(0, 0, 28, 28);
+    };
+
+    const initializeDashboard = () => {
+      clearCanvas();
+      updateTensorMetrics();
+      updateProbabilities(Array.from({ length: 10 }, () => Math.random()));
+      seedHeatmap();
+      backendStatus.textContent = "idle";
+      statusDot.dataset.state = "idle";
+    };
+
+    initializeDashboard();
+
+    const handlePointer = (event) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = Math.floor(((event.clientX - rect.left) / rect.width) * 28);
+      const y = Math.floor(((event.clientY - rect.top) / rect.height) * 28);
+      if (x >= 0 && y >= 0 && x < 28 && y < 28) {
+        draw(x, y);
+        updateTensorMetrics();
+        updateProbabilities(Array.from({ length: 10 }, () => Math.random()));
+      }
+    };
+
+    canvas.addEventListener("pointerdown", (event) => {
+      isDrawing = true;
+      canvas.setPointerCapture(event.pointerId);
+      handlePointer(event);
+    });
+
+    canvas.addEventListener("pointermove", (event) => {
+      if (isDrawing) {
+        handlePointer(event);
+      }
+    });
+
+    canvas.addEventListener("pointerup", () => {
+      isDrawing = false;
+    });
+
+    const selectLayer = (node) => {
+      document.querySelectorAll(".layer-node").forEach((item) => item.classList.remove("active"));
+      node.classList.add("active");
+      const layerName = node.dataset.layer;
+      layerShape.textContent = node.dataset.shape;
+      latency.textContent = (12 + Math.random() * 15).toFixed(1);
+      memory.textContent = `${(0.8 + Math.random() * 1.6).toFixed(2)} MB`;
+      seedHeatmap();
+      tensorStream.textContent = `layer:${layerName} → tensor trace locked.`;
+    };
+
+    document.querySelectorAll(".layer-node").forEach((node) => {
+      node.addEventListener("click", () => selectLayer(node));
+    });
+
+    const handleBackendMessage = (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return;
+      }
+      if (payload.status) {
+        backendStatus.textContent = payload.status;
+      }
+      if (payload.layerTelemetry) {
+        window.RustorchDashboard.setLayerTelemetry(payload.layerTelemetry);
+      }
+      if (Array.isArray(payload.probabilities)) {
+        window.RustorchDashboard.setProbabilities(payload.probabilities);
+      }
+      if (Array.isArray(payload.tensorStream)) {
+        window.RustorchDashboard.setTensorStream(payload.tensorStream);
+      }
+    };
+
+    window.RustorchDashboard = {
+      setBackendStatus(status) {
+        const normalized = status || "idle";
+        backendStatus.textContent = normalized;
+        statusDot.dataset.state = normalized;
+      },
+      setLayerTelemetry({ layerId, latencyUs, memoryMb, activations }) {
+        const node = document.querySelector(`[data-layer-id='${layerId}']`);
+        if (node) {
+          selectLayer(node);
+        }
+        if (typeof latencyUs === "number") {
+          latency.textContent = latencyUs.toFixed(1);
+        }
+        if (typeof memoryMb === "number") {
+          memory.textContent = `${memoryMb.toFixed(2)} MB`;
+        }
+        if (Array.isArray(activations)) {
+          heatmap.innerHTML = "";
+          activations.slice(0, 32).forEach((value) => {
+            const cell = document.createElement("div");
+            const intensity = Math.min(Math.max(value, 0.1), 1);
+            cell.style.background = `rgba(76, 227, 255, ${intensity})`;
+            heatmap.appendChild(cell);
+          });
+        }
+      },
+      setProbabilities(values) {
+        if (Array.isArray(values) && values.length === 10) {
+          updateProbabilities(values);
+        }
+      },
+      setTensorStream(values) {
+        if (Array.isArray(values)) {
+          tensorStream.textContent = `tensor([${values.slice(0, 64).join(", ")} ...])`;
+        }
+      },
+      connectWebSocket(url) {
+        if (!url) {
+          return;
+        }
+        window.RustorchDashboard.setBackendStatus("connecting");
+        const socket = new WebSocket(url);
+        socket.addEventListener("open", () => {
+          window.RustorchDashboard.setBackendStatus("connected");
+        });
+        socket.addEventListener("close", () => {
+          window.RustorchDashboard.setBackendStatus("disconnected");
+        });
+        socket.addEventListener("message", (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            handleBackendMessage(payload);
+          } catch (error) {
+            tensorStream.textContent = "backend payload parse error";
+          }
+        });
+        return socket;
+      },
+      handleBackendMessage,
+    };
+
+    const wsParam = new URLSearchParams(window.location.search).get("ws");
+    if (wsParam) {
+      window.RustorchDashboard.connectWebSocket(wsParam);
+    } else if (window.RUSTORCH_WS_URL) {
+      window.RustorchDashboard.connectWebSocket(window.RUSTORCH_WS_URL);
+    }
+  </script>
+</body>
+</html>
