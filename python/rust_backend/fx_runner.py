@@ -76,14 +76,44 @@ def _is_torch_tensor(value: Any) -> bool:
     return isinstance(value, torch.Tensor)
 
 
+def _require_contiguous(value: torch.Tensor, name: str = "tensor") -> None:
+    if not value.is_contiguous():
+        _LOG.error(
+            "Non-contiguous %s encountered: shape=%s strides=%s",
+            name,
+            tuple(value.shape),
+            value.stride(),
+        )
+        raise RuntimeError(
+            f"{name} must be contiguous (shape={tuple(value.shape)}, strides={value.stride()})"
+        )
+
+
+def _require_numpy_contiguous(value: np.ndarray, name: str = "array") -> None:
+    if not value.flags["C_CONTIGUOUS"]:
+        _LOG.error(
+            "Non-contiguous %s encountered: shape=%s strides=%s",
+            name,
+            value.shape,
+            value.strides,
+        )
+        raise RuntimeError(
+            f"{name} must be C-contiguous (shape={value.shape}, strides={value.strides})"
+        )
+
+
 def _to_pytensor(value: Any) -> rustorch.PyTensor:
     if isinstance(value, rustorch.PyTensor):
         return value
     if isinstance(value, torch.Tensor):
+        _require_contiguous(value, "torch tensor")
         data = value.detach().cpu().numpy()
+        _require_numpy_contiguous(data, "torch tensor numpy view")
         return rustorch.PyTensor(data, requires_grad=False)
     if hasattr(value, "numpy") and not isinstance(value, torch.Tensor):
         data = value.numpy()
+        if isinstance(data, np.ndarray):
+            _require_numpy_contiguous(data, "numpy input")
         return rustorch.PyTensor(data, requires_grad=False)
     if isinstance(value, (int, float)):
         return rustorch.PyTensor(np.array(value, dtype=np.float32), requires_grad=False)

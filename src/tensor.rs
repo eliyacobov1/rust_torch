@@ -103,9 +103,15 @@ impl Tensor {
     }
 
     pub fn transpose(&self) -> Self {
-        Self {
+        self.try_transpose()
+            .expect("transpose: invalid input layout")
+    }
+
+    pub fn try_transpose(&self) -> Result<Self> {
+        self.validate_layout("transpose")?;
+        Ok(Self {
             inner: Arc::new(self.inner.transpose()),
-        }
+        })
     }
 
     pub fn requires_grad(&self) -> bool {
@@ -144,6 +150,19 @@ impl Tensor {
         Self {
             inner: TensorInner::from_vec_f32(v, shape, grad_fn, requires_grad),
         }
+    }
+
+    pub fn try_from_vec_f32_with_strides(
+        v: Vec<f32>,
+        shape: &[usize],
+        strides: &[usize],
+        grad_fn: Option<GradFnRef>,
+        requires_grad: bool,
+    ) -> Result<Self> {
+        let inner = TensorInner::new_with_strides(v, shape, strides, grad_fn, requires_grad)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
     }
 
     pub fn broadcast_shape(a: &[usize], b: &[usize]) -> Vec<usize> {
@@ -282,6 +301,7 @@ impl Tensor {
     }
 
     pub fn try_reshape(&self, new_shape: &[usize]) -> Result<Self> {
+        self.validate_layout("reshape")?;
         let old_numel: usize = self.shape().iter().product();
         let new_numel: usize = new_shape.iter().product();
         if old_numel != new_numel {
@@ -311,6 +331,7 @@ impl Tensor {
             grad: self.inner.grad.as_ref().map(Arc::clone),
             grad_fn,
             shape: new_shape.to_vec(),
+            strides: TensorInner::contiguous_strides(new_shape),
         };
         Ok(Tensor {
             inner: Arc::new(inner),
@@ -334,6 +355,14 @@ impl Tensor {
     pub(crate) fn batch_dims(&self) -> &[usize] {
         self.inner.batch_dims()
     }
+
+    pub fn strides(&self) -> &[usize] {
+        &self.inner.strides
+    }
+
+    pub fn validate_layout(&self, op: &'static str) -> Result<()> {
+        self.inner.validate_layout(op)
+    }
 }
 
 #[derive(Clone)]
@@ -343,6 +372,7 @@ pub(crate) struct TensorInner {
     pub grad: Option<Arc<Mutex<Grad>>>,
     pub grad_fn: Option<GradFnRef>,
     pub shape: Vec<usize>,
+    pub strides: Vec<usize>,
 }
 
 struct Matrix {
@@ -456,7 +486,30 @@ impl TensorInner {
             },
             grad_fn,
             shape: shape.to_vec(),
+            strides: Self::contiguous_strides(shape),
         }
+    }
+
+    pub fn new_with_strides(
+        v: Vec<f32>,
+        shape: &[usize],
+        strides: &[usize],
+        grad_fn: Option<GradFnRef>,
+        requires_grad: bool,
+    ) -> Result<Self> {
+        Self::validate_layout_fields(shape, strides, v.len(), "from_vec_f32_with_strides")?;
+        Ok(Self {
+            storage: Storage { data: v },
+            requires_grad,
+            grad: if requires_grad {
+                Some(Arc::new(Mutex::new(Grad::zeros_like_shape(&shape))))
+            } else {
+                None
+            },
+            grad_fn,
+            shape: shape.to_vec(),
+            strides: strides.to_vec(),
+        })
     }
 
     pub fn from_vec_f32(
@@ -480,6 +533,75 @@ impl TensorInner {
             None,
             requires_grad,
         )
+    }
+
+    fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
+        if shape.is_empty() {
+            return Vec::new();
+        }
+        let mut strides = vec![0; shape.len()];
+        let mut stride: usize = 1;
+        for (idx, dim) in shape.iter().enumerate().rev() {
+            strides[idx] = stride;
+            stride = stride.saturating_mul(*dim);
+        }
+        strides
+    }
+
+    fn validate_layout_fields(
+        shape: &[usize],
+        strides: &[usize],
+        storage_len: usize,
+        op: &'static str,
+    ) -> Result<()> {
+        if shape.len() != strides.len() {
+            return Err(TorchError::InvalidLayout {
+                op,
+                shape: shape.to_vec(),
+                strides: strides.to_vec(),
+                msg: format!(
+                    "shape rank {} does not match strides rank {}",
+                    shape.len(),
+                    strides.len()
+                ),
+            });
+        }
+        let numel: usize = shape.iter().product();
+        if storage_len != numel {
+            return Err(TorchError::InvalidLayout {
+                op,
+                shape: shape.to_vec(),
+                strides: strides.to_vec(),
+                msg: format!(
+                    "storage length {} does not match numel {}",
+                    storage_len, numel
+                ),
+            });
+        }
+        for (dim, stride) in shape.iter().zip(strides.iter()) {
+            if *dim > 1 && *stride == 0 {
+                return Err(TorchError::InvalidLayout {
+                    op,
+                    shape: shape.to_vec(),
+                    strides: strides.to_vec(),
+                    msg: "stride must be > 0 for dimensions > 1".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_layout(&self, op: &'static str) -> Result<()> {
+        Self::validate_layout_fields(&self.shape, &self.strides, self.storage.data.len(), op)?;
+        let expected = Self::contiguous_strides(&self.shape);
+        if self.strides != expected.as_slice() {
+            return Err(TorchError::NonContiguous {
+                op,
+                shape: self.shape.clone(),
+                strides: self.strides.clone(),
+            });
+        }
+        Ok(())
     }
     pub fn numel(&self) -> usize {
         self.shape.iter().product()
@@ -592,6 +714,7 @@ impl TensorInner {
             grad: None,
             grad_fn: None,
             shape: [m, n].clone().to_vec(),
+            strides: TensorInner::contiguous_strides(&[m, n]),
         }
     }
 
