@@ -35,6 +35,11 @@
 - Integration tests (save/load parity)
 - Docs for checkpoint compatibility
 
+**Status**
+- ✅ Implemented versioned checkpoint format (`RTCH` header, metadata + data payload).
+- ✅ Rust + Python `state_dict` save/load with layout/dtype validation.
+- ✅ Round-trip unit test for checkpoint persistence.
+
 ---
 
 ## Task 3 — Release Hardening & Packaging

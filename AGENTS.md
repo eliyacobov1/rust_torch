@@ -2,6 +2,7 @@
 
 ## Project Structure & Module Organization
 - `src/` holds the Rust core (tensor, autograd, ops, storage, CLI in `main.rs`).
+- `src/checkpoint.rs` implements versioned checkpoint serialization and `state_dict` save/load.
 - `tests/` contains Rust integration tests plus a Python test (`test_tensor.py`).
 - `python/` hosts Python-side packaging/bindings helpers.
 - `cpp_ext/` contains optional C++ extension sources.
@@ -62,5 +63,6 @@
 - Python bindings are enabled by default via the `python-bindings` feature. Disable with `--no-default-features` for Rust-only builds.
 - Ensure a compatible Python (>=3.9) environment when running `maturin develop`.
 - `python/rust_backend/backend.py` registers the `rust_backend` for `torch.compile` and expects `rustorch.run_fx`.
+- Use `rustorch.save_state_dict` / `rustorch.load_state_dict` from Python for checkpoint round-trips (format header `RTCH`, versioned metadata + raw f32 payload).
 - `cpp_ext/` is a PrivateUse1 example; its kernels are expected to be wired to Rust via FFI.
 - GitHub CLI in this environment is gitsome; use `gh create-issue owner/repo -t ... -d ...` for issues.

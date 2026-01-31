@@ -1,15 +1,18 @@
 #![cfg(feature = "python-bindings")]
 
-use crate::{ops, tensor::Tensor, TorchError};
+use crate::{checkpoint, ops, tensor::Tensor, TorchError};
 use ndarray::ArrayD;
 use numpy::{IntoPyArray, PyArrayDyn, PyReadonlyArrayDyn, PyUntypedArrayMethods};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
+use std::collections::BTreeMap;
 
 pyo3::create_exception!(rustorch, RustorchError, pyo3::exceptions::PyException);
 pyo3::create_exception!(rustorch, BroadcastError, RustorchError);
 pyo3::create_exception!(rustorch, LayoutError, RustorchError);
 pyo3::create_exception!(rustorch, InvalidDimError, RustorchError);
 pyo3::create_exception!(rustorch, InvalidArgumentError, RustorchError);
+pyo3::create_exception!(rustorch, CheckpointError, RustorchError);
 
 fn map_torch_err(err: TorchError) -> PyErr {
     match err {
@@ -19,6 +22,11 @@ fn map_torch_err(err: TorchError) -> PyErr {
         }
         TorchError::InvalidDim { .. } => InvalidDimError::new_err(err.to_string()),
         TorchError::InvalidArgument { .. } => InvalidArgumentError::new_err(err.to_string()),
+        TorchError::CheckpointIo { .. }
+        | TorchError::CheckpointFormat { .. }
+        | TorchError::CheckpointDtypeMismatch { .. }
+        | TorchError::CheckpointShapeMismatch { .. }
+        | TorchError::CheckpointLayoutMismatch { .. } => CheckpointError::new_err(err.to_string()),
     }
 }
 
@@ -31,6 +39,8 @@ pub struct PyTensor {
 pub fn rustorch(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyTensor>()?;
     m.add_function(wrap_pyfunction!(run_fx, m)?)?;
+    m.add_function(wrap_pyfunction!(save_state_dict, m)?)?;
+    m.add_function(wrap_pyfunction!(load_state_dict, m)?)?;
     m.add("RustorchError", py.get_type::<RustorchError>())?;
     m.add("BroadcastError", py.get_type::<BroadcastError>())?;
     m.add("LayoutError", py.get_type::<LayoutError>())?;
@@ -39,6 +49,7 @@ pub fn rustorch(py: Python, m: &PyModule) -> PyResult<()> {
         "InvalidArgumentError",
         py.get_type::<InvalidArgumentError>(),
     )?;
+    m.add("CheckpointError", py.get_type::<CheckpointError>())?;
     Ok(())
 }
 
@@ -160,4 +171,27 @@ fn run_fx(py: Python<'_>, gm: PyObject, example_inputs: &PyAny) -> PyResult<PyOb
         }
     }
     Ok(gm)
+}
+
+#[pyfunction]
+fn save_state_dict(path: &str, state: &PyAny) -> PyResult<()> {
+    let dict: &PyDict = state.downcast()?;
+    let mut map = BTreeMap::new();
+    for (key, value) in dict.iter() {
+        let name: String = key.extract()?;
+        let tensor: PyRef<PyTensor> = value.extract()?;
+        map.insert(name, tensor.inner.clone());
+    }
+    checkpoint::save_state_dict(path, &map).map_err(map_torch_err)
+}
+
+#[pyfunction]
+fn load_state_dict(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+    let state = checkpoint::load_state_dict(path).map_err(map_torch_err)?;
+    let dict = PyDict::new(py);
+    for (name, tensor) in state {
+        let py_tensor = Py::new(py, PyTensor { inner: tensor })?;
+        dict.set_item(name, py_tensor)?;
+    }
+    Ok(dict.into_py(py))
 }

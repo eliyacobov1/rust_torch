@@ -29,6 +29,31 @@ pub enum TorchError {
     },
     #[error("{op}: {msg}")]
     InvalidArgument { op: &'static str, msg: String },
+    #[error("checkpoint {op}: {msg}")]
+    CheckpointIo { op: &'static str, msg: String },
+    #[error("checkpoint {op}: {msg}")]
+    CheckpointFormat { op: &'static str, msg: String },
+    #[error("checkpoint {op}: dtype mismatch for {name} (expected {expected}, got {actual})")]
+    CheckpointDtypeMismatch {
+        op: &'static str,
+        name: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("checkpoint {op}: shape mismatch for {name} (expected {expected:?}, got {actual:?})")]
+    CheckpointShapeMismatch {
+        op: &'static str,
+        name: String,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+    #[error("checkpoint {op}: layout mismatch for {name} (expected {expected:?}, got {actual:?})")]
+    CheckpointLayoutMismatch {
+        op: &'static str,
+        name: String,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, TorchError>;
