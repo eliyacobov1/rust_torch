@@ -5,8 +5,21 @@ use ndarray::ArrayD;
 use numpy::{IntoPyArray, PyArrayDyn, PyReadonlyArrayDyn, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 
+pyo3::create_exception!(rustorch, RustorchError, pyo3::exceptions::PyException);
+pyo3::create_exception!(rustorch, BroadcastError, RustorchError);
+pyo3::create_exception!(rustorch, LayoutError, RustorchError);
+pyo3::create_exception!(rustorch, InvalidDimError, RustorchError);
+pyo3::create_exception!(rustorch, InvalidArgumentError, RustorchError);
+
 fn map_torch_err(err: TorchError) -> PyErr {
-    pyo3::exceptions::PyValueError::new_err(err.to_string())
+    match err {
+        TorchError::BroadcastMismatch { .. } => BroadcastError::new_err(err.to_string()),
+        TorchError::NonContiguous { .. } | TorchError::InvalidLayout { .. } => {
+            LayoutError::new_err(err.to_string())
+        }
+        TorchError::InvalidDim { .. } => InvalidDimError::new_err(err.to_string()),
+        TorchError::InvalidArgument { .. } => InvalidArgumentError::new_err(err.to_string()),
+    }
 }
 
 #[pyclass]
@@ -15,9 +28,17 @@ pub struct PyTensor {
 }
 
 #[pymodule]
-pub fn rustorch(_py: Python, m: &PyModule) -> PyResult<()> {
+pub fn rustorch(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyTensor>()?;
     m.add_function(wrap_pyfunction!(run_fx, m)?)?;
+    m.add("RustorchError", py.get_type::<RustorchError>())?;
+    m.add("BroadcastError", py.get_type::<BroadcastError>())?;
+    m.add("LayoutError", py.get_type::<LayoutError>())?;
+    m.add("InvalidDimError", py.get_type::<InvalidDimError>())?;
+    m.add(
+        "InvalidArgumentError",
+        py.get_type::<InvalidArgumentError>(),
+    )?;
     Ok(())
 }
 
@@ -93,9 +114,10 @@ impl PyTensor {
         weight: Option<&PyTensor>,
         bias: Option<&PyTensor>,
         training: bool,
-        _momentum: f32,
+        momentum: f32,
         eps: f32,
     ) -> PyResult<PyTensor> {
+        let _ = momentum;
         ops::try_batch_norm(
             &self.inner,
             running_mean.map(|t| &t.inner),

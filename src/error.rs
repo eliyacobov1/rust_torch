@@ -8,6 +8,19 @@ pub enum TorchError {
         lhs: Vec<usize>,
         rhs: Vec<usize>,
     },
+    #[error("{op}: non-contiguous layout not supported (shape={shape:?}, strides={strides:?})")]
+    NonContiguous {
+        op: &'static str,
+        shape: Vec<usize>,
+        strides: Vec<usize>,
+    },
+    #[error("{op}: invalid layout (shape={shape:?}, strides={strides:?}): {msg}")]
+    InvalidLayout {
+        op: &'static str,
+        shape: Vec<usize>,
+        strides: Vec<usize>,
+        msg: String,
+    },
     #[error("{op}: dim {dim} out of range for rank {rank}")]
     InvalidDim {
         op: &'static str,

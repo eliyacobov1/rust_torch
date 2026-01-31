@@ -5,6 +5,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+import rust_backend.fx_runner as fx_runner
 import rust_backend.backend as _  # noqa: F401
 
 
@@ -52,3 +53,10 @@ def test_compile_backend_handles_mnist_backward_ops(caplog: pytest.LogCaptureFix
     assert model.net[0].weight.grad is not None
     assert model.net[-1].weight.grad is not None
     assert "fallback to eager" not in caplog.text
+
+
+def test_fx_runner_rejects_non_contiguous_inputs() -> None:
+    value = torch.randn(2, 3).t()
+    assert not value.is_contiguous()
+    with pytest.raises(RuntimeError, match="contiguous"):
+        fx_runner._to_pytensor(value)

@@ -13,11 +13,19 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::sync::Arc;
 
+fn validate_input_layouts(op: &'static str, tensors: &[&Tensor]) -> Result<()> {
+    for tensor in tensors {
+        tensor.validate_layout(op)?;
+    }
+    Ok(())
+}
+
 pub fn add(a: &Tensor, b: &Tensor) -> Tensor {
     try_add(a, b).expect("add: invalid inputs")
 }
 
 pub fn try_add(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    validate_input_layouts("add", &[a, b])?;
     let shape = Tensor::try_broadcast_shape(a.shape(), b.shape(), "add")?;
 
     // Materialize broadcasted views (copy version you already wrote)
@@ -41,6 +49,7 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Tensor {
 }
 
 pub fn try_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    validate_input_layouts("matmul", &[a, b])?;
     let requires_grad = a.requires_grad() || b.requires_grad();
 
     // Compute broadcasted batch shape
@@ -99,6 +108,7 @@ pub fn mse_loss(predictions: &Tensor, targets: &Tensor) -> Tensor {
 }
 
 pub fn try_mse_loss(predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
+    validate_input_layouts("mse_loss", &[predictions, targets])?;
     // Mean Squared Error: (1/N) * sum((predictions - targets)^2)
     if predictions.shape() != targets.shape() {
         return Err(TorchError::InvalidArgument {
@@ -141,6 +151,7 @@ pub fn mul(a: &Tensor, b: &Tensor) -> Tensor {
 }
 
 pub fn try_mul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    validate_input_layouts("mul", &[a, b])?;
     let shape = Tensor::try_broadcast_shape(a.shape(), b.shape(), "mul")?;
 
     let a_b = a.try_broadcast_to(&shape, "mul")?;
@@ -157,6 +168,11 @@ pub fn try_mul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
 }
 
 pub fn relu(x: &Tensor) -> Tensor {
+    try_relu(x).expect("relu: invalid inputs")
+}
+
+pub fn try_relu(x: &Tensor) -> Result<Tensor> {
+    validate_input_layouts("relu", &[x])?;
     let data: Vec<f32> = x.storage().data.iter().map(|&v| v.max(0.0)).collect();
     let requires_grad = x.requires_grad();
     let grad_fn = if requires_grad {
@@ -164,7 +180,7 @@ pub fn relu(x: &Tensor) -> Tensor {
     } else {
         None
     };
-    Tensor::new(data, x.shape(), grad_fn, requires_grad)
+    Ok(Tensor::new(data, x.shape(), grad_fn, requires_grad))
 }
 
 pub fn dropout(x: &Tensor, p: f32, training: bool, seed: Option<u64>) -> Tensor {
@@ -172,6 +188,7 @@ pub fn dropout(x: &Tensor, p: f32, training: bool, seed: Option<u64>) -> Tensor 
 }
 
 pub fn try_dropout(x: &Tensor, p: f32, training: bool, seed: Option<u64>) -> Result<Tensor> {
+    validate_input_layouts("dropout", &[x])?;
     if !(0.0..1.0).contains(&p) {
         return Err(TorchError::InvalidArgument {
             op: "dropout",
@@ -231,6 +248,7 @@ pub fn log_softmax(x: &Tensor, dim: isize) -> Tensor {
 }
 
 pub fn try_log_softmax(x: &Tensor, dim: isize) -> Result<Tensor> {
+    validate_input_layouts("log_softmax", &[x])?;
     let shape = x.shape();
     let rank = shape.len();
     if rank == 0 {
@@ -294,6 +312,7 @@ pub fn try_max_pool2d(
     dilation: usize,
     ceil_mode: bool,
 ) -> Result<Tensor> {
+    validate_input_layouts("max_pool2d", &[x])?;
     if x.shape().len() != 4 {
         return Err(TorchError::InvalidArgument {
             op: "max_pool2d",
@@ -390,6 +409,11 @@ pub fn try_max_pool2d(
 }
 
 pub fn sum(x: &Tensor) -> Tensor {
+    try_sum(x).expect("sum: invalid inputs")
+}
+
+pub fn try_sum(x: &Tensor) -> Result<Tensor> {
+    validate_input_layouts("sum", &[x])?;
     let total: f32 = x.storage().data.iter().sum();
     let requires_grad = x.requires_grad();
     let grad_fn = if requires_grad {
@@ -397,7 +421,7 @@ pub fn sum(x: &Tensor) -> Tensor {
     } else {
         None
     };
-    Tensor::new(vec![total], &[1], grad_fn, requires_grad)
+    Ok(Tensor::new(vec![total], &[1], grad_fn, requires_grad))
 }
 
 pub fn linear(x: &Tensor, w: &Tensor, b: &Tensor) -> Tensor {
@@ -411,6 +435,7 @@ pub fn nll_loss(log_probs: &Tensor, targets: &Tensor) -> Tensor {
 }
 
 pub fn try_nll_loss(log_probs: &Tensor, targets: &Tensor) -> Result<Tensor> {
+    validate_input_layouts("nll_loss", &[log_probs, targets])?;
     let shape = log_probs.shape();
     if shape.len() != 2 {
         return Err(TorchError::InvalidArgument {
@@ -473,6 +498,7 @@ pub fn try_batch_norm(
     training: bool,
     eps: f32,
 ) -> Result<Tensor> {
+    validate_input_layouts("batch_norm", &[x])?;
     if x.shape().len() != 4 {
         return Err(TorchError::InvalidArgument {
             op: "batch_norm",
@@ -492,6 +518,7 @@ pub fn try_batch_norm(
         ("bias", bias),
     ] {
         if let Some(tensor) = tensor {
+            validate_input_layouts("batch_norm", &[tensor])?;
             if tensor.shape() != &[c] {
                 return Err(TorchError::InvalidArgument {
                     op: "batch_norm",
