@@ -46,6 +46,18 @@
 - PRs should include: a concise summary, key changes, and how tests were run.
 - Link related issues if they exist; include before/after notes for API changes.
 
+## Production-Grade Roadmap (Next 2–3 Milestones)
+1. **Tensor layout/stride semantics + error taxonomy**
+   - Formalize contiguous/strided tensor invariants.
+   - Add shape/stride validation in core ops + FX lowering.
+   - Expose structured errors via Rust + Python.
+2. **Serialization & checkpointing**
+   - Implement `state_dict`-style save/load (Rust + Python).
+   - Versioned metadata with dtype/layout compatibility checks.
+3. **Release hardening & packaging automation**
+   - CI matrix for Rust + Python bindings + FX demos.
+   - Automated wheel builds and benchmark regression checks.
+
 ## Configuration Tips
 - Python bindings are enabled by default via the `python-bindings` feature. Disable with `--no-default-features` for Rust-only builds.
 - Ensure a compatible Python (>=3.9) environment when running `maturin develop`.
