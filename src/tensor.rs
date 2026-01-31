@@ -1,7 +1,11 @@
 use std::array;
+use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Add, Index, IndexMut, Mul};
 use std::sync::{Arc, Mutex};
+
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::autograd::{make_broadcast_grad, make_reshape_grad, Grad, GradFn};
 use crate::error::{Result, TorchError};
@@ -68,6 +72,57 @@ where
 #[derive(Clone)]
 pub struct Tensor {
     pub(crate) inner: Arc<TensorInner>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TensorSerde {
+    data: Vec<f32>,
+    shape: Vec<usize>,
+    strides: Vec<usize>,
+    requires_grad: bool,
+}
+
+impl fmt::Debug for Tensor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tensor")
+            .field("shape", &self.shape())
+            .field("strides", &self.strides())
+            .field("requires_grad", &self.requires_grad())
+            .field("numel", &self.numel())
+            .finish()
+    }
+}
+
+impl Serialize for Tensor {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let payload = TensorSerde {
+            data: self.storage().data.clone(),
+            shape: self.shape().to_vec(),
+            strides: self.strides().to_vec(),
+            requires_grad: self.requires_grad(),
+        };
+        payload.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Tensor {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let payload = TensorSerde::deserialize(deserializer)?;
+        Tensor::try_from_vec_f32_with_strides(
+            payload.data,
+            &payload.shape,
+            &payload.strides,
+            None,
+            payload.requires_grad,
+        )
+        .map_err(|err| D::Error::custom(err.to_string()))
+    }
 }
 
 impl Tensor {
@@ -567,19 +622,22 @@ impl TensorInner {
             });
         }
         let numel: usize = shape.iter().product();
-        if storage_len != numel {
-            return Err(TorchError::InvalidLayout {
-                op,
-                shape: shape.to_vec(),
-                strides: strides.to_vec(),
-                msg: format!(
-                    "storage length {} does not match numel {}",
-                    storage_len, numel
-                ),
-            });
+        if numel == 0 {
+            if storage_len != 0 {
+                return Err(TorchError::InvalidLayout {
+                    op,
+                    shape: shape.to_vec(),
+                    strides: strides.to_vec(),
+                    msg: format!(
+                        "zero-sized tensor must have empty storage (got length {storage_len})"
+                    ),
+                });
+            }
+            return Ok(());
         }
-        for (dim, stride) in shape.iter().zip(strides.iter()) {
-            if *dim > 1 && *stride == 0 {
+        let mut required_len: usize = 1;
+        for (&dim, &stride) in shape.iter().zip(strides.iter()) {
+            if dim > 1 && stride == 0 {
                 return Err(TorchError::InvalidLayout {
                     op,
                     shape: shape.to_vec(),
@@ -587,6 +645,35 @@ impl TensorInner {
                     msg: "stride must be > 0 for dimensions > 1".to_string(),
                 });
             }
+            if dim > 0 {
+                let span = (dim - 1)
+                    .checked_mul(stride)
+                    .ok_or_else(|| TorchError::InvalidLayout {
+                        op,
+                        shape: shape.to_vec(),
+                        strides: strides.to_vec(),
+                        msg: "layout span overflow".to_string(),
+                    })?;
+                required_len = required_len.checked_add(span).ok_or_else(|| {
+                    TorchError::InvalidLayout {
+                        op,
+                        shape: shape.to_vec(),
+                        strides: strides.to_vec(),
+                        msg: "layout span overflow".to_string(),
+                    }
+                })?;
+            }
+        }
+        if storage_len != required_len {
+            return Err(TorchError::InvalidLayout {
+                op,
+                shape: shape.to_vec(),
+                strides: strides.to_vec(),
+                msg: format!(
+                    "storage length {} does not match required layout length {}",
+                    storage_len, required_len
+                ),
+            });
         }
         Ok(())
     }

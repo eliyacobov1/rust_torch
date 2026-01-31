@@ -110,8 +110,10 @@ impl Trainer {
             let mut batch_iter = dataset.batch_iter(self.config.batch_size)?;
             while let Some(batch_result) = batch_iter.next() {
                 let batch = batch_result?;
-                let mut params = model.parameters_mut();
-                optimizer.zero_grad(&mut params)?;
+                {
+                    let mut params = model.parameters_mut();
+                    optimizer.zero_grad(&mut params)?;
+                }
 
                 let preds = model.forward(&batch.features)?;
                 let loss = ops::mse_loss(&preds, &batch.targets);
@@ -126,7 +128,10 @@ impl Trainer {
                         })?;
 
                 let stats = autograd::backward(&loss)?;
-                optimizer.step(&mut params)?;
+                {
+                    let mut params = model.parameters_mut();
+                    optimizer.step(&mut params)?;
+                }
 
                 total_steps += 1;
                 epoch_loss += loss_value;

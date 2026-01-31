@@ -43,3 +43,21 @@ fn invalid_layout_errors() {
         .expect("expected error");
     assert!(matches!(err, TorchError::InvalidLayout { .. }));
 }
+
+#[test]
+fn non_contiguous_layout_requires_correct_storage_len() {
+    let data = vec![0.0; 5];
+    let tensor = Tensor::try_from_vec_f32_with_strides(data, &[2, 2], &[3, 1], None, false)
+        .expect("tensor creation should succeed");
+    let err = ops::try_relu(&tensor).err().expect("expected error");
+    assert!(matches!(err, TorchError::NonContiguous { .. }));
+}
+
+#[test]
+fn zero_sized_layout_requires_empty_storage() {
+    let data = vec![1.0];
+    let err = Tensor::try_from_vec_f32_with_strides(data, &[0, 2], &[2, 1], None, false)
+        .err()
+        .expect("expected error");
+    assert!(matches!(err, TorchError::InvalidLayout { .. }));
+}

@@ -100,6 +100,26 @@ def _require_numpy_contiguous(value: np.ndarray, name: str = "array") -> None:
         raise RuntimeError(
             f"{name} must be C-contiguous (shape={value.shape}, strides={value.strides})"
         )
+    if value.size == 0 and value.nbytes != 0:
+        _LOG.error(
+            "Invalid %s storage for empty shape: shape=%s nbytes=%s",
+            name,
+            value.shape,
+            value.nbytes,
+        )
+        raise RuntimeError(
+            f"{name} has non-empty storage for empty shape (shape={value.shape}, nbytes={value.nbytes})"
+        )
+
+
+def _layout_summary(value: torch.Tensor) -> dict[str, Any]:
+    return {
+        "shape": tuple(value.shape),
+        "stride": value.stride(),
+        "numel": value.numel(),
+        "storage_len": value.storage().size(),
+        "is_contiguous": value.is_contiguous(),
+    }
 
 
 def _to_pytensor(value: Any) -> rustorch.PyTensor:
@@ -652,8 +672,17 @@ def run_fx(gm: GraphModule, example_inputs: list[torch.Tensor]) -> Callable:
         try:
             return _run_graph(gm, *inputs)
         except Exception as exc:  # pragma: no cover - diagnostic fallback
+            layout_info = [
+                _layout_summary(inp)
+                for inp in inputs
+                if isinstance(inp, torch.Tensor)
+            ]
             if not warned:
-                _LOG.warning("rustorch FX runner fallback to eager: %s", exc)
+                _LOG.warning(
+                    "rustorch FX runner fallback to eager: %s (inputs=%s)",
+                    exc,
+                    layout_info,
+                )
                 warned = True
             return gm(*inputs)
 
