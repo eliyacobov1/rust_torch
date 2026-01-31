@@ -56,6 +56,14 @@ pub enum TorchError {
     },
     #[error("autograd {op}: {msg}")]
     Autograd { op: &'static str, msg: String },
+    #[error("experiment {op}: {msg}")]
+    Experiment { op: &'static str, msg: String },
+    #[error("data {op}: {msg}")]
+    Data { op: &'static str, msg: String },
+    #[error("optimizer {op}: {msg}")]
+    Optimizer { op: &'static str, msg: String },
+    #[error("training {op}: {msg}")]
+    Training { op: &'static str, msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, TorchError>;

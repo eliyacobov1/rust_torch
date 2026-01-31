@@ -1,5 +1,15 @@
 # Production-Grade Roadmap (Qx 20xx)
 
+## Deep Sprint (Three Architectural Pillars)
+1. **Experiment Persistence Layer** — Run registry, metrics log, artifact tracking, and checkpoint integration.
+2. **Service/API Wrapper** — High-level orchestration for training workflows and reproducible configs.
+3. **Algorithmic Training Suite** — Model, optimizer, dataset, and trainer pipeline for regression workloads.
+
+**Sprint Outcomes**
+- Unified experiment store with JSONL metrics + artifact ledger.
+- Service layer for synthetic regression and production-ready training runs.
+- End-to-end linear regression training pipeline with optimizer + persistence.
+
 ## Strategic Priorities
 1. Tensor layout/stride semantics + error taxonomy
 2. Serialization & checkpointing (state_dict + metadata)

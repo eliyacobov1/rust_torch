@@ -514,7 +514,9 @@ fn tensor_id(tensor: &Tensor) -> usize {
     Arc::as_ptr(tensor.inner()) as usize
 }
 
-fn collect_graph(loss: &Tensor) -> Result<(HashMap<usize, GraphNode>, HashMap<usize, usize>, usize)> {
+fn collect_graph(
+    loss: &Tensor,
+) -> Result<(HashMap<usize, GraphNode>, HashMap<usize, usize>, usize)> {
     let mut nodes = HashMap::new();
     let mut child_counts: HashMap<usize, usize> = HashMap::new();
     let mut stack = vec![loss.clone()];

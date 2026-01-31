@@ -1,47 +1,153 @@
-use rustorch::tensor::Tensor;
-use rustorch::{autograd, ops};
+use std::env;
+
+use rustorch::api::RustorchService;
+use rustorch::data::SyntheticRegressionConfig;
+use rustorch::training::TrainerConfig;
+use rustorch::{Result, TorchError};
 
 fn main() {
-    // Simulate a batch of 2 samples, 2 features each
-    let x = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0], &[2, 2], None, true);
-    // First layer: 2 in, 3 out
-    let w1 = Tensor::from_vec_f32(vec![0.5, -0.3, 0.8, 0.2, 0.1, -0.5], &[2, 3], None, true);
-    let b1 = Tensor::from_vec_f32(vec![0.1, -0.2, 0.3], &[3], None, true);
-    // Second layer: 3 in, 1 out
-    let w2 = Tensor::from_vec_f32(vec![0.7, -0.6, 0.2], &[3, 1], None, true);
-    let b2 = Tensor::from_vec_f32(vec![0.05], &[1], None, true);
+    if let Err(err) = run() {
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    }
+}
 
-    // Forward pass: x -> linear -> relu -> linear -> scalar output
-    let h1 = ops::linear(&x, &w1, &b1); // [2, 3]
-    let h1_relu = ops::relu(&h1); // [2, 3]
-    let logits = ops::linear(&h1_relu, &w2, &b2); // [2, 1]
-                                                  // For simplicity, sum the logits to get a single scalar output (like reduction)
-    let output = ops::sum(&logits);
+fn run() -> Result<()> {
+    let args: Vec<String> = env::args().collect();
+    if args.len() == 1 {
+        print_usage();
+        return Ok(());
+    }
 
-    // Target: single scalar
-    let target = Tensor::from_vec_f32(vec![1.0], &[1], None, false);
-    let loss = ops::mse_loss(&output, &target);
+    match args[1].as_str() {
+        "train-linear" => run_train_linear(&args[2..]),
+        "--help" | "-h" => {
+            print_usage();
+            Ok(())
+        }
+        command => Err(rustorch::TorchError::InvalidArgument {
+            op: "cli",
+            msg: format!("unknown command {command}"),
+        }),
+    }
+}
 
+fn run_train_linear(args: &[String]) -> Result<()> {
+    let parser = ArgParser::new(args);
+    let runs_dir = parser
+        .get("runs-dir")?
+        .unwrap_or_else(|| "runs".to_string());
+    let samples = parser.get_usize("samples")?.unwrap_or(128);
+    let features = parser.get_usize("features")?.unwrap_or(4);
+    let targets = parser.get_usize("targets")?.unwrap_or(1);
+    let epochs = parser.get_usize("epochs")?.unwrap_or(10);
+    let batch_size = parser.get_usize("batch-size")?.unwrap_or(16);
+    let learning_rate = parser.get_f32("lr")?.unwrap_or(1e-2);
+    let weight_decay = parser.get_f32("weight-decay")?.unwrap_or(0.0);
+    let seed = parser.get_u64("seed")?.unwrap_or(42);
+    let run_name = parser
+        .get("run-name")?
+        .unwrap_or_else(|| "linear_regression".to_string());
+
+    let data_config = SyntheticRegressionConfig {
+        samples,
+        features,
+        targets,
+        noise_std: parser.get_f32("noise")?.unwrap_or(0.05),
+        seed,
+    };
+    let trainer_config = TrainerConfig {
+        epochs,
+        batch_size,
+        learning_rate,
+        weight_decay,
+        log_every: parser.get_usize("log-every")?.unwrap_or(10),
+        checkpoint_every: parser.get_usize("checkpoint-every")?.unwrap_or(1),
+        run_name,
+        tags: vec!["synthetic".to_string(), "linear".to_string()],
+    };
+
+    let service = RustorchService::new(runs_dir)?;
+    let report = service.train_synthetic_regression(data_config, trainer_config, seed)?;
     println!(
-        "Network output: {:?}, Loss: {}",
-        output.storage().data,
-        loss.storage().data[0]
+        "run {} completed: steps={}, final_loss={}, best_loss={}",
+        report.report.run_id,
+        report.report.total_steps,
+        report.report.final_loss,
+        report.report.best_loss
     );
-    autograd::backward(&loss).expect("backward failed");
+    Ok(())
+}
 
-    if let Some(g) = &x.grad() {
-        println!("Grad x: {:?}", g.data);
+fn print_usage() {
+    println!(
+        "rustorch_cli\n\nUSAGE:\n  rustorch_cli train-linear [options]\n\nOPTIONS:\n  --runs-dir <path>        Directory for experiment runs (default: runs)\n  --samples <n>            Number of samples (default: 128)\n  --features <n>           Number of input features (default: 4)\n  --targets <n>            Number of output targets (default: 1)\n  --epochs <n>             Training epochs (default: 10)\n  --batch-size <n>         Batch size (default: 16)\n  --lr <f>                 Learning rate (default: 1e-2)\n  --weight-decay <f>       Weight decay (default: 0)\n  --noise <f>              Noise stddev for synthetic data (default: 0.05)\n  --seed <n>               RNG seed (default: 42)\n  --run-name <name>        Run name label\n  --log-every <n>          Log metrics every n steps (default: 10)\n  --checkpoint-every <n>   Save checkpoint every n epochs (default: 1)\n  -h, --help               Print this help text\n"
+    );
+}
+
+struct ArgParser {
+    args: Vec<String>,
+}
+
+impl ArgParser {
+    fn new(args: &[String]) -> Self {
+        Self {
+            args: args.to_vec(),
+        }
     }
-    if let Some(g) = &w1.grad() {
-        println!("Grad w1: {:?}", g.data);
+
+    fn get(&self, key: &str) -> Result<Option<String>> {
+        let flag = format!("--{key}");
+        Ok(self
+            .args
+            .iter()
+            .position(|value| value == &flag)
+            .and_then(|idx| self.args.get(idx + 1))
+            .cloned())
     }
-    if let Some(g) = &b1.grad() {
-        println!("Grad b1: {:?}", g.data);
+
+    fn get_usize(&self, key: &str) -> Result<Option<usize>> {
+        match self.get(key)? {
+            Some(value) => {
+                value
+                    .parse::<usize>()
+                    .map(Some)
+                    .map_err(|_| TorchError::InvalidArgument {
+                        op: "cli",
+                        msg: format!("--{key} expects usize, got '{value}'"),
+                    })
+            }
+            None => Ok(None),
+        }
     }
-    if let Some(g) = &w2.grad() {
-        println!("Grad w2: {:?}", g.data);
+
+    fn get_u64(&self, key: &str) -> Result<Option<u64>> {
+        match self.get(key)? {
+            Some(value) => {
+                value
+                    .parse::<u64>()
+                    .map(Some)
+                    .map_err(|_| TorchError::InvalidArgument {
+                        op: "cli",
+                        msg: format!("--{key} expects u64, got '{value}'"),
+                    })
+            }
+            None => Ok(None),
+        }
     }
-    if let Some(g) = &b2.grad() {
-        println!("Grad b2: {:?}", g.data);
+
+    fn get_f32(&self, key: &str) -> Result<Option<f32>> {
+        match self.get(key)? {
+            Some(value) => {
+                value
+                    .parse::<f32>()
+                    .map(Some)
+                    .map_err(|_| TorchError::InvalidArgument {
+                        op: "cli",
+                        msg: format!("--{key} expects f32, got '{value}'"),
+                    })
+            }
+            None => Ok(None),
+        }
     }
 }
