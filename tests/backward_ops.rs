@@ -178,7 +178,7 @@ fn linear_backward_propagates_to_weights_and_bias() {
     let out = ops::linear(&x, &w, &b);
     let targets = Tensor::from_vec_f32(vec![0.0, 1.0, -1.0, 2.0], &[2, 2], None, false);
     let loss = ops::mse_loss(&out, &targets);
-    autograd::backward(&loss);
+    autograd::backward(&loss).expect("backward failed");
 
     let grad_out: Vec<f32> = out
         .storage()
@@ -216,6 +216,18 @@ fn linear_backward_propagates_to_weights_and_bias() {
     assert_approx_eq(&grad_x.data, grad_x_expected.as_slice(), 1e-6);
     assert_approx_eq(&grad_w.data, grad_w_expected.as_slice(), 1e-6);
     assert_approx_eq(&grad_b.data, grad_b_expected.as_slice(), 1e-6);
+}
+
+#[test]
+fn backward_accumulates_gradients_for_shared_nodes() {
+    let x = Tensor::from_vec_f32(vec![1.0, 2.0], &[2], None, true);
+    let y = &x + &x;
+    let loss = ops::sum(&y);
+
+    autograd::backward(&loss).expect("backward failed");
+
+    let grad_x = x.grad().expect("gradient for x");
+    assert_approx_eq(&grad_x.data, &[2.0, 2.0], 1e-6);
 }
 
 #[test]

@@ -48,14 +48,18 @@
 - Link related issues if they exist; include before/after notes for API changes.
 
 ## Production-Grade Roadmap (Next 2–3 Milestones)
-1. **Tensor layout/stride semantics + error taxonomy**
+1. **Autograd graph scheduler + gradient accumulation**
+   - Dependency-tracked backward traversal for shared subgraphs.
+   - Fail-fast validation for loss scalar/grad buffers.
+   - Lightweight observability (logging/stats) for traversal health.
+2. **Tensor layout/stride semantics + error taxonomy**
    - Formalize contiguous/strided tensor invariants.
    - Add shape/stride validation in core ops + FX lowering.
    - Expose structured errors via Rust + Python.
-2. **Serialization & checkpointing**
+3. **Serialization & checkpointing**
    - Implement `state_dict`-style save/load (Rust + Python).
    - Versioned metadata with dtype/layout compatibility checks.
-3. **Release hardening & packaging automation**
+4. **Release hardening & packaging automation**
    - CI matrix for Rust + Python bindings + FX demos.
    - Automated wheel builds and benchmark regression checks.
 

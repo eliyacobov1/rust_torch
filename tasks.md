@@ -53,3 +53,23 @@
 **Deliverables**
 - CI pipeline updates
 - Release checklist + support matrix
+
+---
+
+## Task 4 — Autograd Graph Scheduler + Gradient Accumulation
+**Goal:** ensure correct, production-grade backpropagation for shared subgraphs and provide observability.
+
+**Requirements**
+- Topologically scheduled backward pass with dependency tracking.
+- Correct gradient accumulation for tensors used in multiple paths.
+- Fail-fast error handling for missing grads/non-scalar losses.
+- Lightweight logging/metrics for traversal stats.
+
+**Deliverables**
+- Autograd graph executor + stats surface
+- Unit test covering shared-node gradient accumulation
+- Documentation/roadmap update
+
+**Status**
+- ✅ Implemented dependency-tracked autograd traversal with stats + logging.
+- ✅ Added shared-node gradient accumulation test.
