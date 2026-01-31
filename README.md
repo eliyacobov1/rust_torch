@@ -38,7 +38,7 @@
 - **Autograd graph:** each op attaches a dedicated `GradFn` that accumulates into per-tensor gradient buffers; `backward` performs a recursive traversal with cycle protection.
 - **CPU-only execution:** there is no device abstraction or GPU dispatch path in the current code; all kernels are straightforward CPU loops.
 - **Python exposure:** `PyTensor` mirrors the Rust ops and can call into a Torch FX runner via `run_fx` to integrate with Torch tooling.
-- **Layout/stride semantics:** tensors are expected to be contiguous; strided layouts are validated and rejected with explicit `LayoutError` diagnostics in Rust and Python bindings.
+- **Layout/stride semantics:** tensors are expected to be contiguous; strided layouts are validated against storage span requirements and rejected with explicit `LayoutError` diagnostics in Rust and Python bindings.
 
 ## Performance Philosophy
 

@@ -27,7 +27,11 @@ fn map_torch_err(err: TorchError) -> PyErr {
         | TorchError::CheckpointDtypeMismatch { .. }
         | TorchError::CheckpointShapeMismatch { .. }
         | TorchError::CheckpointLayoutMismatch { .. } => CheckpointError::new_err(err.to_string()),
-        TorchError::Autograd { .. } => RustorchError::new_err(err.to_string()),
+        TorchError::Autograd { .. }
+        | TorchError::Experiment { .. }
+        | TorchError::Data { .. }
+        | TorchError::Optimizer { .. }
+        | TorchError::Training { .. } => RustorchError::new_err(err.to_string()),
     }
 }
 
