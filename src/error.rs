@@ -54,6 +54,8 @@ pub enum TorchError {
         expected: Vec<usize>,
         actual: Vec<usize>,
     },
+    #[error("autograd {op}: {msg}")]
+    Autograd { op: &'static str, msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, TorchError>;

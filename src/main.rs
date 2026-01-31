@@ -27,7 +27,7 @@ fn main() {
         output.storage().data,
         loss.storage().data[0]
     );
-    autograd::backward(&loss);
+    autograd::backward(&loss).expect("backward failed");
 
     if let Some(g) = &x.grad() {
         println!("Grad x: {:?}", g.data);

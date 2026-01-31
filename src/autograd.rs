@@ -1,6 +1,8 @@
 use crate::tensor::GradFnRef;
 use crate::tensor::Tensor;
-use std::collections::HashSet;
+use crate::{error::Result, TorchError};
+use log::info;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -494,26 +496,128 @@ pub fn make_nll_loss_grad(
     })
 }
 
-pub fn backward(loss: &Tensor) {
-    let mut visited = HashSet::new();
-    backward_recursive(loss, &mut visited);
+#[derive(Debug, Clone, Copy)]
+pub struct BackwardStats {
+    pub nodes: usize,
+    pub edges: usize,
+    pub steps: usize,
+    pub max_ready_queue: usize,
 }
 
-fn backward_recursive(tensor: &Tensor, visited: &mut HashSet<usize>) {
-    let id = tensor as *const _ as usize;
-    if !visited.insert(id) {
-        return; // already visited
-    }
-    // Only initialize grad for the starting tensor
-    if tensor.grad_lock().is_some() && visited.len() == 1 {
-        tensor.grad_lock().unwrap().lock().unwrap().data[0] = 1.0;
-    }
-    if let Some(gf) = &tensor.grad_fn() {
-        gf.backward(&tensor.grad().as_ref().unwrap().data);
-        for parent in gf.parents() {
-            backward_recursive(parent, visited);
+#[derive(Clone)]
+struct GraphNode {
+    tensor: Tensor,
+    parents: Vec<Tensor>,
+}
+
+fn tensor_id(tensor: &Tensor) -> usize {
+    Arc::as_ptr(tensor.inner()) as usize
+}
+
+fn collect_graph(loss: &Tensor) -> Result<(HashMap<usize, GraphNode>, HashMap<usize, usize>, usize)> {
+    let mut nodes = HashMap::new();
+    let mut child_counts: HashMap<usize, usize> = HashMap::new();
+    let mut stack = vec![loss.clone()];
+    let mut visited = HashSet::new();
+    let mut edges = 0;
+
+    while let Some(tensor) = stack.pop() {
+        let id = tensor_id(&tensor);
+        if !visited.insert(id) {
+            continue;
         }
+        let mut parents = Vec::new();
+        if let Some(grad_fn) = tensor.grad_fn() {
+            for parent in grad_fn.parents() {
+                if parent.grad_lock().is_none() {
+                    continue;
+                }
+                edges += 1;
+                let parent_id = tensor_id(parent);
+                *child_counts.entry(parent_id).or_insert(0) += 1;
+                parents.push(parent.clone());
+                if !visited.contains(&parent_id) {
+                    stack.push(parent.clone());
+                }
+            }
+        }
+        nodes.insert(id, GraphNode { tensor, parents });
     }
+
+    Ok((nodes, child_counts, edges))
+}
+
+pub fn backward(loss: &Tensor) -> Result<BackwardStats> {
+    let loss_grad = loss.grad_lock().ok_or_else(|| TorchError::Autograd {
+        op: "backward",
+        msg: "loss tensor does not require gradients".to_string(),
+    })?;
+    {
+        let mut grad = loss_grad.lock().unwrap();
+        if grad.data.len() != 1 {
+            return Err(TorchError::Autograd {
+                op: "backward",
+                msg: format!(
+                    "loss tensor must be scalar, found {} elements",
+                    grad.data.len()
+                ),
+            });
+        }
+        grad.data[0] = 1.0;
+    }
+
+    let (nodes, mut pending_children, edges) = collect_graph(loss)?;
+    let loss_id = tensor_id(loss);
+    let mut ready = VecDeque::from([loss_id]);
+    let mut steps = 0;
+    let mut max_ready_queue = ready.len();
+
+    while let Some(id) = ready.pop_front() {
+        let node = nodes.get(&id).ok_or_else(|| TorchError::Autograd {
+            op: "backward",
+            msg: "graph node missing during traversal".to_string(),
+        })?;
+        if let Some(grad_fn) = node.tensor.grad_fn() {
+            let grad = node.tensor.grad().ok_or_else(|| TorchError::Autograd {
+                op: "backward",
+                msg: "missing gradient buffer for tensor".to_string(),
+            })?;
+            grad_fn.backward(&grad.data);
+        }
+        steps += 1;
+        for parent in &node.parents {
+            let parent_id = tensor_id(parent);
+            if let Some(count) = pending_children.get_mut(&parent_id) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    ready.push_back(parent_id);
+                }
+            }
+        }
+        max_ready_queue = max_ready_queue.max(ready.len());
+    }
+
+    if steps != nodes.len() {
+        return Err(TorchError::Autograd {
+            op: "backward",
+            msg: format!(
+                "backward traversal incomplete: visited {steps} of {} nodes",
+                nodes.len()
+            ),
+        });
+    }
+
+    let stats = BackwardStats {
+        nodes: nodes.len(),
+        edges,
+        steps,
+        max_ready_queue,
+    };
+    info!(
+        "autograd.backward completed: nodes={}, edges={}, steps={}, max_ready_queue={}",
+        stats.nodes, stats.edges, stats.steps, stats.max_ready_queue
+    );
+    Ok(stats)
 }
 
 pub struct BroadcastBackward {
