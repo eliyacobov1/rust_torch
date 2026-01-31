@@ -1,5 +1,10 @@
 # Repository Guidelines
 
+## Deep Sprint (Three Architectural Pillars)
+1. **Experiment Persistence Layer** — Run registry, JSONL metrics, artifact tracking, and checkpoint integration.
+2. **Service/API Wrapper** — High-level orchestration for training workflows and reproducible configs.
+3. **Algorithmic Training Suite** — Model, optimizer, dataset, and trainer pipeline for regression workloads.
+
 ## Project Structure & Module Organization
 - `src/` holds the Rust core (tensor, autograd, ops, storage, CLI in `main.rs`).
 - `src/checkpoint.rs` implements versioned checkpoint serialization and `state_dict` save/load.

@@ -58,22 +58,24 @@ pub fn save_state_dict<P: AsRef<Path>>(path: P, state: &StateDict) -> Result<()>
             requires_grad: tensor.requires_grad(),
         });
 
-        offset_bytes = offset_bytes
-            .checked_add(len_bytes)
-            .ok_or_else(|| TorchError::CheckpointFormat {
-                op: "save_state_dict",
-                msg: "checkpoint data size overflow".to_string(),
-            })?;
+        offset_bytes =
+            offset_bytes
+                .checked_add(len_bytes)
+                .ok_or_else(|| TorchError::CheckpointFormat {
+                    op: "save_state_dict",
+                    msg: "checkpoint data size overflow".to_string(),
+                })?;
     }
 
     let metadata = CheckpointMetadata {
         version: CHECKPOINT_VERSION,
         tensors,
     };
-    let metadata_bytes = serde_json::to_vec(&metadata).map_err(|err| TorchError::CheckpointFormat {
-        op: "save_state_dict",
-        msg: format!("metadata serialization failed: {err}"),
-    })?;
+    let metadata_bytes =
+        serde_json::to_vec(&metadata).map_err(|err| TorchError::CheckpointFormat {
+            op: "save_state_dict",
+            msg: format!("metadata serialization failed: {err}"),
+        })?;
     let metadata_len = metadata_bytes.len() as u64;
 
     let mut file = File::create(path).map_err(|err| TorchError::CheckpointIo {
@@ -233,16 +235,15 @@ pub fn load_state_dict<P: AsRef<Path>>(path: P) -> Result<StateDict> {
         let slice = &data_bytes[tensor_meta.offset_bytes..end];
         let mut values = Vec::with_capacity(numel);
         for chunk in slice.chunks_exact(std::mem::size_of::<f32>()) {
-            let array: [u8; 4] = chunk
-                .try_into()
-                .map_err(|_| TorchError::CheckpointFormat {
-                    op: "load_state_dict",
-                    msg: format!("tensor {} chunk decode failed", tensor_meta.name),
-                })?;
+            let array: [u8; 4] = chunk.try_into().map_err(|_| TorchError::CheckpointFormat {
+                op: "load_state_dict",
+                msg: format!("tensor {} chunk decode failed", tensor_meta.name),
+            })?;
             values.push(f32::from_le_bytes(array));
         }
 
-        let tensor = Tensor::from_vec_f32(values, &tensor_meta.shape, None, tensor_meta.requires_grad);
+        let tensor =
+            Tensor::from_vec_f32(values, &tensor_meta.shape, None, tensor_meta.requires_grad);
         if tensor.strides() != tensor_meta.strides.as_slice() {
             return Err(TorchError::CheckpointLayoutMismatch {
                 op: "load_state_dict",
