@@ -263,6 +263,7 @@ impl Tensor {
     }
 
     pub fn try_broadcast_to(&self, target_shape: &[usize], op: &'static str) -> Result<Tensor> {
+        self.validate_layout(op)?;
         // TODO: broadcast optimizations (no copy, etc)
         let src_shape = self.shape();
         if target_shape.len() < src_shape.len() {
