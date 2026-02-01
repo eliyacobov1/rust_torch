@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 use std::ops::{Add, Index, IndexMut, Mul};
 use std::sync::{Arc, Mutex};
 
+use log::debug;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -72,6 +73,12 @@ where
 #[derive(Clone)]
 pub struct Tensor {
     pub(crate) inner: Arc<TensorInner>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TensorLayout {
+    Contiguous,
+    Strided,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -415,8 +422,20 @@ impl Tensor {
         &self.inner.strides
     }
 
+    pub fn is_contiguous(&self) -> bool {
+        self.inner.is_contiguous()
+    }
+
+    pub fn layout(&self) -> TensorLayout {
+        self.inner.layout()
+    }
+
     pub fn validate_layout(&self, op: &'static str) -> Result<()> {
-        self.inner.validate_layout(op)
+        self.inner.validate_contiguous_layout(op)
+    }
+
+    pub fn validate_strided_layout(&self, op: &'static str) -> Result<()> {
+        self.inner.validate_strided_layout(op)
     }
 }
 
@@ -552,7 +571,7 @@ impl TensorInner {
         grad_fn: Option<GradFnRef>,
         requires_grad: bool,
     ) -> Result<Self> {
-        Self::validate_layout_fields(shape, strides, v.len(), "from_vec_f32_with_strides")?;
+        Self::validate_strided_layout_fields(shape, strides, v.len(), "from_vec_f32_with_strides")?;
         Ok(Self {
             storage: Storage { data: v },
             requires_grad,
@@ -603,7 +622,7 @@ impl TensorInner {
         strides
     }
 
-    fn validate_layout_fields(
+    fn validate_strided_layout_fields(
         shape: &[usize],
         strides: &[usize],
         storage_len: usize,
@@ -646,22 +665,24 @@ impl TensorInner {
                 });
             }
             if dim > 0 {
-                let span = (dim - 1)
-                    .checked_mul(stride)
-                    .ok_or_else(|| TorchError::InvalidLayout {
-                        op,
-                        shape: shape.to_vec(),
-                        strides: strides.to_vec(),
-                        msg: "layout span overflow".to_string(),
-                    })?;
-                required_len = required_len.checked_add(span).ok_or_else(|| {
-                    TorchError::InvalidLayout {
-                        op,
-                        shape: shape.to_vec(),
-                        strides: strides.to_vec(),
-                        msg: "layout span overflow".to_string(),
-                    }
-                })?;
+                let span =
+                    (dim - 1)
+                        .checked_mul(stride)
+                        .ok_or_else(|| TorchError::InvalidLayout {
+                            op,
+                            shape: shape.to_vec(),
+                            strides: strides.to_vec(),
+                            msg: "layout span overflow".to_string(),
+                        })?;
+                required_len =
+                    required_len
+                        .checked_add(span)
+                        .ok_or_else(|| TorchError::InvalidLayout {
+                            op,
+                            shape: shape.to_vec(),
+                            strides: strides.to_vec(),
+                            msg: "layout span overflow".to_string(),
+                        })?;
             }
         }
         if storage_len != required_len {
@@ -678,10 +699,22 @@ impl TensorInner {
         Ok(())
     }
 
-    fn validate_layout(&self, op: &'static str) -> Result<()> {
-        Self::validate_layout_fields(&self.shape, &self.strides, self.storage.data.len(), op)?;
-        let expected = Self::contiguous_strides(&self.shape);
-        if self.strides != expected.as_slice() {
+    fn validate_strided_layout(&self, op: &'static str) -> Result<()> {
+        Self::validate_strided_layout_fields(
+            &self.shape,
+            &self.strides,
+            self.storage.data.len(),
+            op,
+        )
+    }
+
+    fn validate_contiguous_layout(&self, op: &'static str) -> Result<()> {
+        self.validate_strided_layout(op)?;
+        if !self.is_contiguous() {
+            debug!(
+                "Non-contiguous layout rejected: op={} shape={:?} strides={:?}",
+                op, self.shape, self.strides
+            );
             return Err(TorchError::NonContiguous {
                 op,
                 shape: self.shape.clone(),
@@ -689,6 +722,18 @@ impl TensorInner {
             });
         }
         Ok(())
+    }
+
+    fn is_contiguous(&self) -> bool {
+        self.strides == Self::contiguous_strides(&self.shape)
+    }
+
+    fn layout(&self) -> TensorLayout {
+        if self.is_contiguous() {
+            TensorLayout::Contiguous
+        } else {
+            TensorLayout::Strided
+        }
     }
     pub fn numel(&self) -> usize {
         self.shape.iter().product()

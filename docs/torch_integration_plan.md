@@ -35,6 +35,12 @@ associated test/demo coverage.
   with gated dataset downloads (M2).
 - FX runner support and backward op coverage have been expanded to cover core
   ops needed by the demo (M1/M3).
+- Tensor layout semantics are now explicit: tensors are validated against
+  shape/stride/storage invariants on construction, and core ops require
+  contiguous layouts with structured `LayoutError`/`TorchError` reporting when
+  unsupported strided inputs are encountered.
+- FX lowering enforces contiguous + valid storage inputs and logs layout
+  diagnostics before falling back to eager execution.
 - Parity harness tests now compare eager vs compiled forward/grad results for
   representative MLP and CNN models (M4).
 - `log_softmax` + `nll_loss` ops are available to support classification losses

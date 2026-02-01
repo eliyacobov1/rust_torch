@@ -89,6 +89,31 @@ def _require_contiguous(value: torch.Tensor, name: str = "tensor") -> None:
         )
 
 
+def _require_torch_storage(value: torch.Tensor, name: str = "tensor") -> None:
+    storage_len = value.storage().size()
+    if value.numel() == 0 and storage_len != 0:
+        _LOG.error(
+            "Invalid %s storage for empty shape: shape=%s storage_len=%s",
+            name,
+            tuple(value.shape),
+            storage_len,
+        )
+        raise RuntimeError(
+            f"{name} has non-empty storage for empty shape (shape={tuple(value.shape)}, storage_len={storage_len})"
+        )
+    if value.numel() > 0 and storage_len < value.numel():
+        _LOG.error(
+            "Invalid %s storage: shape=%s numel=%s storage_len=%s",
+            name,
+            tuple(value.shape),
+            value.numel(),
+            storage_len,
+        )
+        raise RuntimeError(
+            f"{name} storage too small for shape (shape={tuple(value.shape)}, numel={value.numel()}, storage_len={storage_len})"
+        )
+
+
 def _require_numpy_contiguous(value: np.ndarray, name: str = "array") -> None:
     if not value.flags["C_CONTIGUOUS"]:
         _LOG.error(
@@ -127,6 +152,7 @@ def _to_pytensor(value: Any) -> rustorch.PyTensor:
         return value
     if isinstance(value, torch.Tensor):
         _require_contiguous(value, "torch tensor")
+        _require_torch_storage(value, "torch tensor")
         data = value.detach().cpu().numpy()
         _require_numpy_contiguous(data, "torch tensor numpy view")
         return rustorch.PyTensor(data, requires_grad=False)
@@ -669,6 +695,10 @@ def run_fx(gm: GraphModule, example_inputs: list[torch.Tensor]) -> Callable:
 
     def compiled(*inputs: torch.Tensor) -> torch.Tensor:
         nonlocal warned
+        for idx, value in enumerate(inputs):
+            if isinstance(value, torch.Tensor):
+                _require_contiguous(value, f"input[{idx}]")
+                _require_torch_storage(value, f"input[{idx}]")
         try:
             return _run_graph(gm, *inputs)
         except Exception as exc:  # pragma: no cover - diagnostic fallback
