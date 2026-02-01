@@ -29,3 +29,15 @@ fn validate_strided_layout_allows_non_contiguous() {
         .expect("contiguous validation should fail");
     assert!(matches!(err, TorchError::NonContiguous { .. }));
 }
+
+#[test]
+fn broadcast_requires_contiguous_layout() {
+    let data = vec![0.0; 5];
+    let strided = Tensor::try_from_vec_f32_with_strides(data, &[2, 2], &[3, 1], None, false)
+        .expect("strided tensor should be valid");
+    let err = strided
+        .try_broadcast_to(&[2, 2, 2], "broadcast_to")
+        .err()
+        .expect("expected broadcast error");
+    assert!(matches!(err, TorchError::NonContiguous { .. }));
+}
