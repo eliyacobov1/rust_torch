@@ -45,6 +45,15 @@ fn invalid_layout_errors() {
 }
 
 #[test]
+fn overlapping_layout_errors() {
+    let data = vec![1.0; 3];
+    let err = Tensor::try_from_vec_f32_with_strides(data, &[2, 2], &[1, 1], None, false)
+        .err()
+        .expect("expected error");
+    assert!(matches!(err, TorchError::OverlappingLayout { .. }));
+}
+
+#[test]
 fn contiguous_layout_validates_storage_len() {
     let data = vec![1.0; 5];
     let err = Tensor::try_from_vec_f32(data, &[2, 3], None, false)

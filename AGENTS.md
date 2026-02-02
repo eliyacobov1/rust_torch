@@ -75,3 +75,19 @@
 - Use `rustorch.save_state_dict` / `rustorch.load_state_dict` from Python for checkpoint round-trips (format header `RTCH`, versioned metadata + raw f32 payload).
 - `cpp_ext/` is a PrivateUse1 example; its kernels are expected to be wired to Rust via FFI.
 - GitHub CLI in this environment is gitsome; use `gh create-issue owner/repo -t ... -d ...` for issues.
+
+## Task 1 Completion Log (Tensor Layout/Stride Semantics + Error Taxonomy)
+- Completed overlap-aware stride validation with layout telemetry counters.
+- Hardened FX lowering to reject overlapping/dense violations and report layout diagnostics.
+- Added layout-focused error coverage and benchmark scaffolding for validation cost.
+
+## Next-Gen Follow-up Tasks
+1. **Strided views + alias tracking**
+   - Implement view tensors with copy-on-write semantics and explicit alias metadata.
+2. **Layout-specialized kernels**
+   - Introduce stride-pattern dispatch (contiguous, padded, transposed) for core ops.
+3. **Telemetry export pipeline**
+   - Push layout validation counters into experiment tracking and CLI reporting.
+
+## Technical Debt Log
+- Layout telemetry is currently process-local; schedule a refactor to reset counters per run and to emit structured metrics alongside experiment logs.

@@ -30,6 +30,11 @@
 - Rust tests + Python parity coverage
 - Documentation update
 
+**Status**
+- ✅ Added overlap-aware stride validation with telemetry counters for layout checks.
+- ✅ Extended FX lowering to validate dense, non-overlapping storage layouts.
+- ✅ Added error taxonomy coverage and layout-focused tests + benchmark harness.
+
 ---
 
 ## Task 2 — Serialization & Checkpointing
@@ -83,3 +88,16 @@
 **Status**
 - ✅ Implemented dependency-tracked autograd traversal with stats + logging.
 - ✅ Added shared-node gradient accumulation test.
+
+---
+
+## Follow-up Tasks (Post-Task 1)
+1. **Strided view support with copy-on-write**
+   - Enable view semantics for non-contiguous layouts and enforce alias tracking.
+2. **Layout-aware kernel dispatch**
+   - Select specialized kernels based on stride patterns (contiguous vs. padded vs. transposed).
+3. **Layout observability dashboard**
+   - Surface layout telemetry counters in the experiment store + CLI.
+
+## Technical Debt Log
+- **Layout telemetry aggregation**: counters are process-local and not yet wired into the experiment store; schedule a follow-up to emit metrics per run and to reset counters between runs.
