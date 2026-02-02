@@ -84,7 +84,7 @@ def _require_contiguous(value: torch.Tensor, name: str = "tensor") -> None:
             tuple(value.shape),
             value.stride(),
         )
-        raise RuntimeError(
+        raise rustorch.LayoutError(
             f"{name} must be contiguous (shape={tuple(value.shape)}, strides={value.stride()})"
         )
 
@@ -98,7 +98,7 @@ def _require_torch_storage(value: torch.Tensor, name: str = "tensor") -> None:
             tuple(value.shape),
             storage_len,
         )
-        raise RuntimeError(
+        raise rustorch.LayoutError(
             f"{name} has non-empty storage for empty shape (shape={tuple(value.shape)}, storage_len={storage_len})"
         )
     if value.numel() > 0 and storage_len < value.numel():
@@ -109,7 +109,7 @@ def _require_torch_storage(value: torch.Tensor, name: str = "tensor") -> None:
             value.numel(),
             storage_len,
         )
-        raise RuntimeError(
+        raise rustorch.LayoutError(
             f"{name} storage too small for shape (shape={tuple(value.shape)}, numel={value.numel()}, storage_len={storage_len})"
         )
 
@@ -122,7 +122,7 @@ def _require_numpy_contiguous(value: np.ndarray, name: str = "array") -> None:
             value.shape,
             value.strides,
         )
-        raise RuntimeError(
+        raise rustorch.LayoutError(
             f"{name} must be C-contiguous (shape={value.shape}, strides={value.strides})"
         )
     if value.size == 0 and value.nbytes != 0:
@@ -132,7 +132,7 @@ def _require_numpy_contiguous(value: np.ndarray, name: str = "array") -> None:
             value.shape,
             value.nbytes,
         )
-        raise RuntimeError(
+        raise rustorch.LayoutError(
             f"{name} has non-empty storage for empty shape (shape={value.shape}, nbytes={value.nbytes})"
         )
 

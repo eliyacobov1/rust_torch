@@ -214,6 +214,18 @@ impl Tensor {
         }
     }
 
+    pub fn try_from_vec_f32(
+        v: Vec<f32>,
+        shape: &[usize],
+        grad_fn: Option<GradFnRef>,
+        requires_grad: bool,
+    ) -> Result<Self> {
+        let inner = TensorInner::new_with_contiguous_layout(v, shape, grad_fn, requires_grad)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
     pub fn try_from_vec_f32_with_strides(
         v: Vec<f32>,
         shape: &[usize],
@@ -584,6 +596,28 @@ impl TensorInner {
             grad_fn,
             shape: shape.to_vec(),
             strides: strides.to_vec(),
+        })
+    }
+
+    pub fn new_with_contiguous_layout(
+        v: Vec<f32>,
+        shape: &[usize],
+        grad_fn: Option<GradFnRef>,
+        requires_grad: bool,
+    ) -> Result<Self> {
+        let strides = Self::contiguous_strides(shape);
+        Self::validate_strided_layout_fields(shape, &strides, v.len(), "from_vec_f32")?;
+        Ok(Self {
+            storage: Storage { data: v },
+            requires_grad,
+            grad: if requires_grad {
+                Some(Arc::new(Mutex::new(Grad::zeros_like_shape(&shape))))
+            } else {
+                None
+            },
+            grad_fn,
+            shape: shape.to_vec(),
+            strides,
         })
     }
 
