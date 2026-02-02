@@ -9,6 +9,7 @@ pub mod ops;
 pub mod optim;
 pub mod storage;
 pub mod tensor;
+pub mod telemetry;
 pub mod training;
 
 #[cfg(feature = "python-bindings")]

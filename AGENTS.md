@@ -81,6 +81,11 @@
 - Hardened FX lowering to reject overlapping/dense violations and report layout diagnostics.
 - Added layout-focused error coverage and benchmark scaffolding for validation cost.
 
+## Task 3 Completion Log (Release Hardening & Packaging)
+- Expanded CI to multi-OS coverage for Rust and Python workflows.
+- Added automated wheel builds with artifact uploads.
+- Introduced benchmark regression checks for performance tracking.
+
 ## Next-Gen Follow-up Tasks
 1. **Strided views + alias tracking**
    - Implement view tensors with copy-on-write semantics and explicit alias metadata.
@@ -88,6 +93,13 @@
    - Introduce stride-pattern dispatch (contiguous, padded, transposed) for core ops.
 3. **Telemetry export pipeline**
    - Push layout validation counters into experiment tracking and CLI reporting.
+4. **Release checklist automation**
+   - Generate release notes, version bumps, and changelog updates from CI metadata.
+5. **Cross-platform CI caching**
+   - Add sccache and pip caching to speed up multi-OS builds.
+6. **Benchmark telemetry export**
+   - Publish benchmark summaries into the experiment store for historical trending.
 
 ## Technical Debt Log
 - Layout telemetry is currently process-local; schedule a refactor to reset counters per run and to emit structured metrics alongside experiment logs.
+- CI benchmarks use short measurement windows for speed; schedule nightly runs with full sample sizes to harden baselines.

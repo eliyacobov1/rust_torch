@@ -69,6 +69,11 @@
 - CI pipeline updates
 - Release checklist + support matrix
 
+**Status**
+- ✅ Expanded CI to a multi-OS matrix (Linux/macOS/Windows) for Rust + Python bindings.
+- ✅ Added automated wheel builds with artifact upload for release validation.
+- ✅ Added a benchmark regression job for consistent performance tracking.
+
 ---
 
 ## Task 4 — Autograd Graph Scheduler + Gradient Accumulation
@@ -99,5 +104,14 @@
 3. **Layout observability dashboard**
    - Surface layout telemetry counters in the experiment store + CLI.
 
+## Follow-up Tasks (Post-Task 3)
+1. **Release checklist automation**
+   - Generate release notes, version bumps, and changelog updates from CI metadata.
+2. **Cross-platform dependency caching**
+   - Introduce sccache and pip caching for faster CI and reproducible builds.
+3. **Benchmark telemetry export**
+   - Publish benchmark summaries to the experiment store for historical performance tracking.
+
 ## Technical Debt Log
 - **Layout telemetry aggregation**: counters are process-local and not yet wired into the experiment store; schedule a follow-up to emit metrics per run and to reset counters between runs.
+- **Benchmark depth in CI**: current CI benchmarks use short measurement windows for speed; schedule nightly runs with full sample sizes for more stable baselines.

@@ -1,4 +1,5 @@
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use rustorch::telemetry::{jsonl_recorder_from_env, TelemetryRecorder};
 use rustorch::tensor::Tensor;
 
 fn required_len(shape: &[usize], strides: &[usize]) -> usize {
@@ -29,6 +30,7 @@ fn padded_strides(shape: &[usize], padding: usize) -> Vec<usize> {
 }
 
 fn bench_layout_validation(c: &mut Criterion) {
+    let telemetry = init_telemetry();
     let mut group = c.benchmark_group("layout_validation");
     for &rank in &[2usize, 4, 8, 12] {
         let shape = vec![2usize; rank];
@@ -38,6 +40,11 @@ fn bench_layout_validation(c: &mut Criterion) {
             b.iter_batched(
                 || vec![0.0f32; len],
                 |data| {
+                    let _timer = telemetry.as_ref().map(|recorder| {
+                        recorder
+                            .timer("bench_layout_validation")
+                            .with_tag("rank", format!("{rank}"))
+                    });
                     let _ = Tensor::try_from_vec_f32_with_strides(
                         data,
                         &shape,
@@ -56,3 +63,13 @@ fn bench_layout_validation(c: &mut Criterion) {
 
 criterion_group!(benches, bench_layout_validation);
 criterion_main!(benches);
+
+fn init_telemetry() -> Option<TelemetryRecorder<rustorch::telemetry::JsonlSink>> {
+    match jsonl_recorder_from_env("RUSTORCH_BENCH_TELEMETRY") {
+        Ok(recorder) => recorder,
+        Err(err) => {
+            eprintln!("telemetry disabled: {err:?}");
+            None
+        }
+    }
+}
