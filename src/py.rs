@@ -65,9 +65,9 @@ impl PyTensor {
     fn new(array: PyReadonlyArrayDyn<f32>, requires_grad: bool) -> PyResult<Self> {
         let shape = array.shape().to_vec();
         let data = array.as_array().iter().cloned().collect();
-        Ok(Self {
-            inner: Tensor::from_vec_f32(data, &shape, None, requires_grad),
-        })
+        Tensor::try_from_vec_f32(data, &shape, None, requires_grad)
+            .map(|inner| Self { inner })
+            .map_err(map_torch_err)
     }
 
     fn add(&self, other: &PyTensor) -> PyResult<PyTensor> {

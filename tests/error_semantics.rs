@@ -45,6 +45,15 @@ fn invalid_layout_errors() {
 }
 
 #[test]
+fn contiguous_layout_validates_storage_len() {
+    let data = vec![1.0; 5];
+    let err = Tensor::try_from_vec_f32(data, &[2, 3], None, false)
+        .err()
+        .expect("expected error");
+    assert!(matches!(err, TorchError::InvalidLayout { .. }));
+}
+
+#[test]
 fn non_contiguous_layout_requires_correct_storage_len() {
     let data = vec![0.0; 5];
     let tensor = Tensor::try_from_vec_f32_with_strides(data, &[2, 2], &[3, 1], None, false)
