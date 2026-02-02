@@ -18,9 +18,9 @@ pyo3::create_exception!(rustorch, CheckpointError, RustorchError);
 fn map_torch_err(err: TorchError) -> PyErr {
     match err {
         TorchError::BroadcastMismatch { .. } => BroadcastError::new_err(err.to_string()),
-        TorchError::NonContiguous { .. } | TorchError::InvalidLayout { .. } => {
-            LayoutError::new_err(err.to_string())
-        }
+        TorchError::NonContiguous { .. }
+        | TorchError::InvalidLayout { .. }
+        | TorchError::OverlappingLayout { .. } => LayoutError::new_err(err.to_string()),
         TorchError::InvalidDim { .. } => InvalidDimError::new_err(err.to_string()),
         TorchError::InvalidArgument { .. } => InvalidArgumentError::new_err(err.to_string()),
         TorchError::CheckpointIo { .. }

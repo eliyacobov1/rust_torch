@@ -21,6 +21,13 @@ pub enum TorchError {
         strides: Vec<usize>,
         msg: String,
     },
+    #[error("{op}: overlapping layout (shape={shape:?}, strides={strides:?}): {msg}")]
+    OverlappingLayout {
+        op: &'static str,
+        shape: Vec<usize>,
+        strides: Vec<usize>,
+        msg: String,
+    },
     #[error("{op}: dim {dim} out of range for rank {rank}")]
     InvalidDim {
         op: &'static str,

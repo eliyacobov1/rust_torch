@@ -91,6 +91,16 @@ def _require_contiguous(value: torch.Tensor, name: str = "tensor") -> None:
 
 def _require_torch_storage(value: torch.Tensor, name: str = "tensor") -> None:
     storage_len = value.storage().size()
+    if hasattr(value, "is_non_overlapping_and_dense") and not value.is_non_overlapping_and_dense():
+        _LOG.error(
+            "Overlapping %s encountered: shape=%s strides=%s",
+            name,
+            tuple(value.shape),
+            value.stride(),
+        )
+        raise rustorch.LayoutError(
+            f"{name} must be non-overlapping and dense (shape={tuple(value.shape)}, strides={value.stride()})"
+        )
     if value.numel() == 0 and storage_len != 0:
         _LOG.error(
             "Invalid %s storage for empty shape: shape=%s storage_len=%s",
@@ -101,7 +111,8 @@ def _require_torch_storage(value: torch.Tensor, name: str = "tensor") -> None:
         raise rustorch.LayoutError(
             f"{name} has non-empty storage for empty shape (shape={tuple(value.shape)}, storage_len={storage_len})"
         )
-    if value.numel() > 0 and storage_len < value.numel():
+    required_len = _required_storage_len(value.shape, value.stride(), value.storage_offset())
+    if value.numel() > 0 and storage_len < required_len:
         _LOG.error(
             "Invalid %s storage: shape=%s numel=%s storage_len=%s",
             name,
@@ -110,7 +121,8 @@ def _require_torch_storage(value: torch.Tensor, name: str = "tensor") -> None:
             storage_len,
         )
         raise rustorch.LayoutError(
-            f"{name} storage too small for shape (shape={tuple(value.shape)}, numel={value.numel()}, storage_len={storage_len})"
+            f"{name} storage too small for layout (shape={tuple(value.shape)}, strides={value.stride()}, "
+            f"storage_offset={value.storage_offset()}, storage_len={storage_len})"
         )
 
 
@@ -143,8 +155,26 @@ def _layout_summary(value: torch.Tensor) -> dict[str, Any]:
         "stride": value.stride(),
         "numel": value.numel(),
         "storage_len": value.storage().size(),
+        "storage_offset": value.storage_offset(),
         "is_contiguous": value.is_contiguous(),
     }
+
+
+def _required_storage_len(
+    shape: tuple[int, ...], stride: tuple[int, ...], storage_offset: int
+) -> int:
+    if not shape:
+        return storage_offset
+    required = 1
+    for dim, step in zip(shape, stride):
+        if dim == 0:
+            return storage_offset
+        if dim > 1 and step == 0:
+            raise rustorch.LayoutError(
+                f"stride must be > 0 for dimensions > 1 (shape={shape}, strides={stride})"
+            )
+        required += (dim - 1) * step
+    return storage_offset + required
 
 
 def _to_pytensor(value: Any) -> rustorch.PyTensor:

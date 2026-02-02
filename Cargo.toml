@@ -25,6 +25,17 @@ pyo3 = { version = "0.21", features = ["extension-module"], optional = true }
 numpy = { version = "0.21", optional = true }
 ndarray = { version = "0.15", optional = true }
 
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "bench_elementwise"
+harness = false
+
+[[bench]]
+name = "bench_layout_validation"
+harness = false
+
 [[bin]]
 name = "rustorch_cli"
 path = "src/main.rs"

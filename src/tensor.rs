@@ -2,6 +2,7 @@ use std::array;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Add, Index, IndexMut, Mul};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use log::debug;
@@ -79,6 +80,25 @@ pub struct Tensor {
 pub enum TensorLayout {
     Contiguous,
     Strided,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutStats {
+    pub validations: u64,
+    pub failures: u64,
+    pub overlap_failures: u64,
+}
+
+static LAYOUT_VALIDATIONS: AtomicU64 = AtomicU64::new(0);
+static LAYOUT_FAILURES: AtomicU64 = AtomicU64::new(0);
+static LAYOUT_OVERLAP_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+pub fn layout_stats() -> LayoutStats {
+    LayoutStats {
+        validations: LAYOUT_VALIDATIONS.load(Ordering::Relaxed),
+        failures: LAYOUT_FAILURES.load(Ordering::Relaxed),
+        overlap_failures: LAYOUT_OVERLAP_FAILURES.load(Ordering::Relaxed),
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -408,6 +428,12 @@ impl Tensor {
             shape: new_shape.to_vec(),
             strides: TensorInner::contiguous_strides(new_shape),
         };
+        TensorInner::validate_strided_layout_fields(
+            &inner.shape,
+            &inner.strides,
+            inner.storage.data.len(),
+            "reshape",
+        )?;
         Ok(Tensor {
             inner: Arc::new(inner),
         })
@@ -663,8 +689,9 @@ impl TensorInner {
         storage_len: usize,
         op: &'static str,
     ) -> Result<()> {
+        LAYOUT_VALIDATIONS.fetch_add(1, Ordering::Relaxed);
         if shape.len() != strides.len() {
-            return Err(TorchError::InvalidLayout {
+            return Self::record_layout_failure(TorchError::InvalidLayout {
                 op,
                 shape: shape.to_vec(),
                 strides: strides.to_vec(),
@@ -678,7 +705,7 @@ impl TensorInner {
         let numel: usize = shape.iter().product();
         if numel == 0 {
             if storage_len != 0 {
-                return Err(TorchError::InvalidLayout {
+                return Self::record_layout_failure(TorchError::InvalidLayout {
                     op,
                     shape: shape.to_vec(),
                     strides: strides.to_vec(),
@@ -692,7 +719,7 @@ impl TensorInner {
         let mut required_len: usize = 1;
         for (&dim, &stride) in shape.iter().zip(strides.iter()) {
             if dim > 1 && stride == 0 {
-                return Err(TorchError::InvalidLayout {
+                return Self::record_layout_failure(TorchError::InvalidLayout {
                     op,
                     shape: shape.to_vec(),
                     strides: strides.to_vec(),
@@ -703,25 +730,31 @@ impl TensorInner {
                 let span =
                     (dim - 1)
                         .checked_mul(stride)
-                        .ok_or_else(|| TorchError::InvalidLayout {
-                            op,
-                            shape: shape.to_vec(),
-                            strides: strides.to_vec(),
-                            msg: "layout span overflow".to_string(),
+                        .ok_or_else(|| {
+                            LAYOUT_FAILURES.fetch_add(1, Ordering::Relaxed);
+                            TorchError::InvalidLayout {
+                                op,
+                                shape: shape.to_vec(),
+                                strides: strides.to_vec(),
+                                msg: "layout span overflow".to_string(),
+                            }
                         })?;
                 required_len =
                     required_len
                         .checked_add(span)
-                        .ok_or_else(|| TorchError::InvalidLayout {
-                            op,
-                            shape: shape.to_vec(),
-                            strides: strides.to_vec(),
-                            msg: "layout span overflow".to_string(),
+                        .ok_or_else(|| {
+                            LAYOUT_FAILURES.fetch_add(1, Ordering::Relaxed);
+                            TorchError::InvalidLayout {
+                                op,
+                                shape: shape.to_vec(),
+                                strides: strides.to_vec(),
+                                msg: "layout span overflow".to_string(),
+                            }
                         })?;
             }
         }
         if storage_len != required_len {
-            return Err(TorchError::InvalidLayout {
+            return Self::record_layout_failure(TorchError::InvalidLayout {
                 op,
                 shape: shape.to_vec(),
                 strides: strides.to_vec(),
@@ -731,7 +764,54 @@ impl TensorInner {
                 ),
             });
         }
+        Self::validate_no_overlap(shape, strides, op)?;
         Ok(())
+    }
+
+    fn validate_no_overlap(shape: &[usize], strides: &[usize], op: &'static str) -> Result<()> {
+        let mut ordered_dims: Vec<(usize, usize)> = shape
+            .iter()
+            .zip(strides.iter())
+            .filter_map(|(&dim, &stride)| {
+                if dim > 1 {
+                    Some((stride, dim))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        ordered_dims.sort_by_key(|(stride, _)| *stride);
+        let mut block: usize = 1;
+        for (stride, dim) in ordered_dims {
+            if stride < block {
+                LAYOUT_OVERLAP_FAILURES.fetch_add(1, Ordering::Relaxed);
+                return Self::record_layout_failure(TorchError::OverlappingLayout {
+                    op,
+                    shape: shape.to_vec(),
+                    strides: strides.to_vec(),
+                    msg: format!(
+                        "stride {stride} is smaller than required block size {block}"
+                    ),
+                });
+            }
+            block = block
+                .checked_mul(dim)
+                .ok_or_else(|| {
+                    LAYOUT_FAILURES.fetch_add(1, Ordering::Relaxed);
+                    TorchError::InvalidLayout {
+                        op,
+                        shape: shape.to_vec(),
+                        strides: strides.to_vec(),
+                        msg: "layout span overflow".to_string(),
+                    }
+                })?;
+        }
+        Ok(())
+    }
+
+    fn record_layout_failure(err: TorchError) -> Result<()> {
+        LAYOUT_FAILURES.fetch_add(1, Ordering::Relaxed);
+        Err(err)
     }
 
     fn validate_strided_layout(&self, op: &'static str) -> Result<()> {
