@@ -1,6 +1,7 @@
 #![cfg(feature = "python-bindings")]
 
 use crate::{checkpoint, ops, tensor::Tensor, TorchError};
+use log::error;
 use ndarray::ArrayD;
 use numpy::{IntoPyArray, PyArrayDyn, PyReadonlyArrayDyn, PyUntypedArrayMethods};
 use pyo3::prelude::*;
@@ -63,6 +64,18 @@ impl PyTensor {
     #[new]
     #[pyo3(signature = (array, requires_grad=false))]
     fn new(array: PyReadonlyArrayDyn<f32>, requires_grad: bool) -> PyResult<Self> {
+        if !array.is_c_contiguous() {
+            error!(
+                "Non-contiguous numpy input received: shape={:?}, strides={:?}",
+                array.shape(),
+                array.strides()
+            );
+            return Err(LayoutError::new_err(format!(
+                "numpy input must be C-contiguous (shape={:?}, strides={:?})",
+                array.shape(),
+                array.strides()
+            )));
+        }
         let shape = array.shape().to_vec();
         let data = array.as_array().iter().cloned().collect();
         Tensor::try_from_vec_f32(data, &shape, None, requires_grad)

@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import rustorch
 
 def test_add_mul_matmul():
@@ -13,3 +14,11 @@ def test_add_mul_matmul():
     b = rustorch.PyTensor(np.random.randn(5, 6).astype(np.float32), requires_grad=True)
     c = a.matmul(b)
     assert c.numpy().shape == (4, 6)
+
+
+def test_numpy_requires_contiguous_layout():
+    base = np.arange(6, dtype=np.float32).reshape(2, 3)
+    non_contig = base.T
+    assert not non_contig.flags["C_CONTIGUOUS"]
+    with pytest.raises(rustorch.LayoutError):
+        rustorch.PyTensor(non_contig, requires_grad=False)
