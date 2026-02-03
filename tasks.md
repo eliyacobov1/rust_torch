@@ -93,6 +93,7 @@
 **Status**
 - ✅ Implemented dependency-tracked autograd traversal with stats + logging.
 - ✅ Added shared-node gradient accumulation test.
+- ✅ Added configurable parallel backward execution, observer hooks, and autograd benchmark coverage.
 
 ---
 
@@ -112,6 +113,15 @@
 3. **Benchmark telemetry export**
    - Publish benchmark summaries to the experiment store for historical performance tracking.
 
+## Follow-up Tasks (Post-Task 4)
+1. **Autograd execution scheduler**
+   - Introduce a work-stealing executor for node batches and per-op concurrency tuning.
+2. **Autograd tracing exporter**
+   - Emit structured spans (per node/batch) into the experiment telemetry store.
+3. **Deterministic parallelism controls**
+   - Add reproducible scheduling modes with deterministic reduction ordering.
+
 ## Technical Debt Log
 - **Layout telemetry aggregation**: counters are process-local and not yet wired into the experiment store; schedule a follow-up to emit metrics per run and to reset counters between runs.
 - **Benchmark depth in CI**: current CI benchmarks use short measurement windows for speed; schedule nightly runs with full sample sizes for more stable baselines.
+- **Autograd parallelism**: current batch-level parallelism uses scoped threads without a dedicated pool; consider a shared executor for large training runs.

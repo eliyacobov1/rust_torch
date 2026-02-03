@@ -1,6 +1,9 @@
 mod common;
 
 use rustorch::{autograd, ops, tensor::Tensor};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use common::{assert_approx_eq, matmul, transpose};
 
@@ -216,6 +219,51 @@ fn linear_backward_propagates_to_weights_and_bias() {
     assert_approx_eq(&grad_x.data, grad_x_expected.as_slice(), 1e-6);
     assert_approx_eq(&grad_w.data, grad_w_expected.as_slice(), 1e-6);
     assert_approx_eq(&grad_b.data, grad_b_expected.as_slice(), 1e-6);
+}
+
+#[derive(Default)]
+struct CountingObserver {
+    batches: AtomicUsize,
+    starts: AtomicUsize,
+    ends: AtomicUsize,
+}
+
+impl autograd::BackwardObserver for CountingObserver {
+    fn on_batch_start(&self, _batch_size: usize) {
+        self.batches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn on_node_start(&self, _node_id: usize) {
+        self.starts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn on_node_end(&self, _node_id: usize, _duration: Duration) {
+        self.ends.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn backward_with_config_tracks_parallel_batches() {
+    let a = Tensor::from_vec_f32(vec![1.0, 2.0, 3.0, 4.0], &[2, 2], None, true);
+    let b = Tensor::from_vec_f32(vec![5.0, 6.0, 7.0, 8.0], &[2, 2], None, true);
+    let c = Tensor::from_vec_f32(vec![1.5, 2.5, 3.5, 4.5], &[2, 2], None, true);
+    let d = Tensor::from_vec_f32(vec![0.5, 1.5, 2.5, 3.5], &[2, 2], None, true);
+
+    let left = ops::add(&a, &b);
+    let right = ops::add(&c, &d);
+    let out = ops::mul(&left, &right);
+    let targets = Tensor::from_vec_f32(vec![1.0, 1.0, 1.0, 1.0], &[2, 2], None, false);
+    let loss = ops::mse_loss(&out, &targets);
+
+    let observer = Arc::new(CountingObserver::default());
+    let config = autograd::BackwardConfig::new(2).with_observer(observer.clone());
+    let stats = autograd::backward_with_config(&loss, &config).expect("backward with config");
+
+    assert!(stats.max_batch_size >= 2);
+    assert!(stats.max_parallelism >= 2);
+    assert_eq!(observer.starts.load(Ordering::Relaxed), stats.nodes);
+    assert_eq!(observer.ends.load(Ordering::Relaxed), stats.nodes);
+    assert!(observer.batches.load(Ordering::Relaxed) >= 1);
 }
 
 #[test]

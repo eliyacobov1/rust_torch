@@ -4,6 +4,8 @@ use crate::{error::Result, TorchError};
 use log::info;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 pub struct Grad {
@@ -502,6 +504,52 @@ pub struct BackwardStats {
     pub edges: usize,
     pub steps: usize,
     pub max_ready_queue: usize,
+    pub max_batch_size: usize,
+    pub max_parallelism: usize,
+    pub duration_ms: u128,
+    pub total_node_time_ms: u128,
+    pub max_node_time_ms: u128,
+}
+
+pub trait BackwardObserver: Send + Sync {
+    fn on_batch_start(&self, _batch_size: usize) {}
+    fn on_node_start(&self, _node_id: usize) {}
+    fn on_node_end(&self, _node_id: usize, _duration: Duration) {}
+    fn on_complete(&self, _stats: &BackwardStats) {}
+}
+
+#[derive(Default)]
+pub struct NoopBackwardObserver;
+
+impl BackwardObserver for NoopBackwardObserver {}
+
+#[derive(Clone)]
+pub struct BackwardConfig {
+    pub max_parallelism: usize,
+    pub observer: Arc<dyn BackwardObserver>,
+}
+
+impl Default for BackwardConfig {
+    fn default() -> Self {
+        Self {
+            max_parallelism: 1,
+            observer: Arc::new(NoopBackwardObserver),
+        }
+    }
+}
+
+impl BackwardConfig {
+    pub fn new(max_parallelism: usize) -> Self {
+        Self {
+            max_parallelism: max_parallelism.max(1),
+            observer: Arc::new(NoopBackwardObserver),
+        }
+    }
+
+    pub fn with_observer(mut self, observer: Arc<dyn BackwardObserver>) -> Self {
+        self.observer = observer;
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -550,6 +598,17 @@ fn collect_graph(
 }
 
 pub fn backward(loss: &Tensor) -> Result<BackwardStats> {
+    backward_with_config(loss, &BackwardConfig::default())
+}
+
+struct NodeExecution {
+    id: usize,
+    parents: Vec<usize>,
+    grad_fn: Option<GradFnRef>,
+    grad_data: Vec<f32>,
+}
+
+pub fn backward_with_config(loss: &Tensor, config: &BackwardConfig) -> Result<BackwardStats> {
     let loss_grad = loss.grad_lock().ok_or_else(|| TorchError::Autograd {
         op: "backward",
         msg: "loss tensor does not require gradients".to_string(),
@@ -573,30 +632,103 @@ pub fn backward(loss: &Tensor) -> Result<BackwardStats> {
     let mut ready = VecDeque::from([loss_id]);
     let mut steps = 0;
     let mut max_ready_queue = ready.len();
+    let mut max_batch_size = 0usize;
+    let mut max_parallelism = 1usize;
+    let observer = Arc::clone(&config.observer);
+    let start_time = Instant::now();
+    let total_node_time_ms = AtomicU64::new(0);
+    let max_node_time_ms = AtomicU64::new(0);
 
-    while let Some(id) = ready.pop_front() {
-        let node = nodes.get(&id).ok_or_else(|| TorchError::Autograd {
-            op: "backward",
-            msg: "graph node missing during traversal".to_string(),
-        })?;
-        if let Some(grad_fn) = node.tensor.grad_fn() {
-            let grad = node.tensor.grad().ok_or_else(|| TorchError::Autograd {
-                op: "backward",
-                msg: "missing gradient buffer for tensor".to_string(),
-            })?;
-            grad_fn.backward(&grad.data);
+    while !ready.is_empty() {
+        let mut batch = Vec::new();
+        while let Some(id) = ready.pop_front() {
+            batch.push(id);
         }
-        steps += 1;
-        for parent in &node.parents {
-            let parent_id = tensor_id(parent);
-            if let Some(count) = pending_children.get_mut(&parent_id) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    ready.push_back(parent_id);
+        max_ready_queue = max_ready_queue.max(batch.len());
+        max_batch_size = max_batch_size.max(batch.len());
+        observer.on_batch_start(batch.len());
+
+        let mut executions = Vec::with_capacity(batch.len());
+        for id in batch {
+            let node = nodes.get(&id).ok_or_else(|| TorchError::Autograd {
+                op: "backward",
+                msg: "graph node missing during traversal".to_string(),
+            })?;
+            let grad_fn = node.tensor.grad_fn();
+            let grad_data = if grad_fn.is_some() {
+                let grad = node.tensor.grad().ok_or_else(|| TorchError::Autograd {
+                    op: "backward",
+                    msg: "missing gradient buffer for tensor".to_string(),
+                })?;
+                grad.data
+            } else {
+                Vec::new()
+            };
+            let parents = node.parents.iter().map(tensor_id).collect();
+            executions.push(NodeExecution {
+                id,
+                parents,
+                grad_fn,
+                grad_data,
+            });
+        }
+
+        let requested_parallelism = config.max_parallelism.max(1);
+        let batch_parallelism = requested_parallelism.min(executions.len().max(1));
+        max_parallelism = max_parallelism.max(batch_parallelism);
+
+        let run_node = |exec: &NodeExecution| {
+            observer.on_node_start(exec.id);
+            let node_start = Instant::now();
+            if let Some(grad_fn) = &exec.grad_fn {
+                grad_fn.backward(&exec.grad_data);
+            }
+            let elapsed = node_start.elapsed();
+            let elapsed_ms = elapsed.as_millis() as u64;
+            total_node_time_ms.fetch_add(elapsed_ms, Ordering::Relaxed);
+            let mut current_max = max_node_time_ms.load(Ordering::Relaxed);
+            while elapsed_ms > current_max {
+                match max_node_time_ms.compare_exchange(
+                    current_max,
+                    elapsed_ms,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(updated) => current_max = updated,
+                }
+            }
+            observer.on_node_end(exec.id, elapsed);
+        };
+
+        if batch_parallelism <= 1 {
+            for exec in &executions {
+                run_node(exec);
+            }
+        } else {
+            let chunk_size = (executions.len() + batch_parallelism - 1) / batch_parallelism;
+            std::thread::scope(|scope| {
+                for chunk in executions.chunks(chunk_size) {
+                    scope.spawn(move || {
+                        for exec in chunk {
+                            run_node(exec);
+                        }
+                    });
+                }
+            });
+        }
+
+        steps += executions.len();
+        for exec in &executions {
+            for parent_id in &exec.parents {
+                if let Some(count) = pending_children.get_mut(parent_id) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        ready.push_back(*parent_id);
+                    }
                 }
             }
         }
-        max_ready_queue = max_ready_queue.max(ready.len());
     }
 
     if steps != nodes.len() {
@@ -614,11 +746,25 @@ pub fn backward(loss: &Tensor) -> Result<BackwardStats> {
         edges,
         steps,
         max_ready_queue,
+        max_batch_size,
+        max_parallelism,
+        duration_ms: start_time.elapsed().as_millis(),
+        total_node_time_ms: total_node_time_ms.load(Ordering::Relaxed) as u128,
+        max_node_time_ms: max_node_time_ms.load(Ordering::Relaxed) as u128,
     };
     info!(
-        "autograd.backward completed: nodes={}, edges={}, steps={}, max_ready_queue={}",
-        stats.nodes, stats.edges, stats.steps, stats.max_ready_queue
+        "autograd.backward completed: nodes={}, edges={}, steps={}, max_ready_queue={}, max_batch_size={}, max_parallelism={}, duration_ms={}, total_node_time_ms={}, max_node_time_ms={}",
+        stats.nodes,
+        stats.edges,
+        stats.steps,
+        stats.max_ready_queue,
+        stats.max_batch_size,
+        stats.max_parallelism,
+        stats.duration_ms,
+        stats.total_node_time_ms,
+        stats.max_node_time_ms
     );
+    observer.on_complete(&stats);
     Ok(stats)
 }
 
