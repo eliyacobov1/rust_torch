@@ -86,6 +86,11 @@
 - Added automated wheel builds with artifact uploads.
 - Introduced benchmark regression checks for performance tracking.
 
+## Task 4 Completion Log (Autograd Graph Scheduler + Gradient Accumulation)
+- Added configurable parallel backward execution with batch-level scheduling.
+- Introduced autograd observer hooks and extended backward stats for telemetry.
+- Added autograd benchmark coverage for serial vs. parallel execution.
+
 ## Next-Gen Follow-up Tasks
 1. **Strided views + alias tracking**
    - Implement view tensors with copy-on-write semantics and explicit alias metadata.
@@ -99,7 +104,14 @@
    - Add sccache and pip caching to speed up multi-OS builds.
 6. **Benchmark telemetry export**
    - Publish benchmark summaries into the experiment store for historical trending.
+7. **Autograd executor tuning**
+   - Add a work-stealing scheduler with configurable parallelism and op-level throttling.
+8. **Autograd trace export**
+   - Emit per-node timing spans into the experiment store for timeline analysis.
+9. **Deterministic backward modes**
+   - Provide deterministic scheduling and reduction ordering for reproducible training.
 
 ## Technical Debt Log
 - Layout telemetry is currently process-local; schedule a refactor to reset counters per run and to emit structured metrics alongside experiment logs.
 - CI benchmarks use short measurement windows for speed; schedule nightly runs with full sample sizes to harden baselines.
+- Autograd parallelism currently uses scoped threads per batch; consider a shared worker pool to reduce scheduling overhead.
