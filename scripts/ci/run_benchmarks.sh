@@ -9,7 +9,7 @@ BENCH_OUTPUT_DIR="$ROOT_DIR/artifacts"
 mkdir -p "$BENCH_OUTPUT_DIR"
 export RUSTORCH_BENCH_TELEMETRY="$BENCH_OUTPUT_DIR/benchmarks.jsonl"
 
-cargo bench --bench bench_elementwise --bench bench_layout_validation -- \
+cargo bench --no-default-features --bench bench_elementwise --bench bench_layout_validation -- \
   --sample-size 10 \
   --warm-up-time 0.1 \
   --measurement-time 0.2

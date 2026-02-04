@@ -38,10 +38,11 @@ jobs:
         run: |
           python -m pip install -U pip wheel setuptools
           python -m pip install maturin numpy pytest
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - name: Build rustorch (PyO3)
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+      - name: Build and install rustorch wheel
         run: |
-          maturin develop --release
+          maturin build --release --out dist
+          python -m pip install --force-reinstall dist/*.whl
       - name: Run Python tests
         env:
           PYTHONPATH: python
