@@ -117,14 +117,14 @@
 - Autograd parallelism currently uses scoped threads per batch; consider a shared worker pool to reduce scheduling overhead.
 
 ## Project Status (Interview Readiness)
-- **Status:** Yes — experiment run reporting is now CLI-addressable (list, summary, CSV export) with benchmark coverage; remaining gaps are incremental hardening.
+- **Status:** Partial — streaming quantile rollups are now in place for high-volume metrics, but schema validation and run comparison tooling are still missing for a fully senior-grade showcase.
 
 ## Minimal Gaps Checklist (100% Readiness)
-- [ ] Add streaming quantiles (GK/TDigest) to avoid O(n) metric rollups for large runs.
+- [x] Add streaming quantiles (GK/TDigest) to avoid O(n) metric rollups for large runs.
 - [ ] Provide JSON/CSV schema validation for run summaries and exports to guard against partial writes.
 - [ ] Add a run comparison command that highlights metric deltas across selected runs.
 
 ## Follow-up Tasks (Post-Implementation)
 1. **Run comparison reports**: CLI command to compare multiple runs with diff tables + deltas.
-2. **Summary rollup acceleration**: adopt streaming quantiles to reduce memory pressure on large metrics logs.
-3. **Export schema validation**: publish schema + validate CSV/JSON outputs for automation pipelines.
+2. **Export schema validation**: publish schema + validate CSV/JSON outputs for automation pipelines.
+3. **Quantile accuracy tuning**: expose GK epsilon via config and add accuracy benchmarks on large metrics logs.

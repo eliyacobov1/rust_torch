@@ -17,6 +17,16 @@ fn bench_run_summary(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
+    group.bench_function("rollup_100000", |b| {
+        b.iter_batched(
+            || create_run_with_metrics(100000),
+            |run| {
+                run.write_summary(Some(Duration::from_millis(250)))
+                    .expect("summary");
+            },
+            BatchSize::SmallInput,
+        )
+    });
     group.bench_function("export_csv_100_runs", |b| {
         b.iter_batched(
             || create_store_with_runs(100),

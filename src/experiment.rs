@@ -807,20 +807,152 @@ fn summarize_layout() -> LayoutSummary {
     }
 }
 
+const GK_EPSILON: f64 = 0.01;
+const GK_EXACT_LIMIT: usize = 512;
+
+#[derive(Clone, Debug)]
+struct GkEntry {
+    value: f64,
+    g: u64,
+    delta: u64,
+}
+
+#[derive(Debug)]
+struct GkSummary {
+    entries: Vec<GkEntry>,
+    exact: Vec<f64>,
+    count: u64,
+    epsilon: f64,
+}
+
+impl Default for GkSummary {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            exact: Vec::new(),
+            count: 0,
+            epsilon: GK_EPSILON,
+        }
+    }
+}
+
+impl GkSummary {
+    fn insert(&mut self, value: f64) {
+        self.count += 1;
+        if self.entries.is_empty() {
+            self.exact.push(value);
+            if self.exact.len() <= GK_EXACT_LIMIT {
+                return;
+            }
+            let mut seeded = std::mem::take(&mut self.exact);
+            seeded.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            self.entries = seeded
+                .into_iter()
+                .map(|value| GkEntry {
+                    value,
+                    g: 1,
+                    delta: 0,
+                })
+                .collect();
+        }
+
+        let insert_idx = self
+            .entries
+            .partition_point(|entry| entry.value < value);
+        let delta = if insert_idx == 0 || insert_idx == self.entries.len() {
+            0
+        } else {
+            ((2.0 * self.epsilon * self.count as f64)
+                .floor()
+                .max(0.0) as u64)
+                .saturating_sub(1)
+        };
+        self.entries.insert(
+            insert_idx,
+            GkEntry {
+                value,
+                g: 1,
+                delta,
+            },
+        );
+        self.compress();
+    }
+
+    fn compress(&mut self) {
+        if self.entries.len() < 2 {
+            return;
+        }
+        let threshold = (2.0 * self.epsilon * self.count as f64).floor() as u64;
+        let mut idx = 0;
+        while idx + 1 < self.entries.len() {
+            let next = &self.entries[idx + 1];
+            let current = &self.entries[idx];
+            if current.g + next.g + next.delta <= threshold {
+                let merged = GkEntry {
+                    value: next.value,
+                    g: current.g + next.g,
+                    delta: next.delta,
+                };
+                self.entries[idx + 1] = merged;
+                self.entries.remove(idx);
+            } else {
+                idx += 1;
+            }
+        }
+    }
+
+    fn query(&self, quantile: f64) -> f64 {
+        if self.count == 0 {
+            return 0.0;
+        }
+        if self.entries.is_empty() {
+            let mut values = self.exact.clone();
+            if values.is_empty() {
+                return 0.0;
+            }
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            return percentile_f64_exact(&values, quantile);
+        }
+        let clamped = quantile.clamp(0.0, 1.0);
+        if clamped <= 0.0 {
+            return self.entries.first().map(|e| e.value).unwrap_or(0.0);
+        }
+        if clamped >= 1.0 {
+            return self.entries.last().map(|e| e.value).unwrap_or(0.0);
+        }
+        let rank = (clamped * self.count as f64).ceil() as u64;
+        let allowed = (self.epsilon * self.count as f64).ceil() as u64;
+        let mut rmin = 0u64;
+        for entry in &self.entries {
+            rmin += entry.g;
+            let rmax = rmin + entry.delta;
+            if rmax + allowed >= rank {
+                return entry.value;
+            }
+        }
+        self.entries
+            .last()
+            .map(|entry| entry.value)
+            .unwrap_or(0.0)
+    }
+}
+
 #[derive(Default)]
 struct MetricAccumulator {
-    values: Vec<f32>,
+    quantiles: GkSummary,
     sum: f64,
     min: f32,
     max: f32,
     last: f32,
+    count: u64,
     initialized: bool,
 }
 
 impl MetricAccumulator {
     fn push(&mut self, value: f32) {
-        self.values.push(value);
+        self.quantiles.insert(value as f64);
         self.sum += value as f64;
+        self.count += 1;
         if !self.initialized {
             self.min = value;
             self.max = value;
@@ -837,9 +969,8 @@ impl MetricAccumulator {
         self.last = value;
     }
 
-    fn into_stats(mut self) -> MetricStats {
-        let count = self.values.len() as u64;
-        if count == 0 {
+    fn into_stats(self) -> MetricStats {
+        if self.count == 0 {
             return MetricStats {
                 count: 0,
                 min: 0.0,
@@ -850,13 +981,11 @@ impl MetricAccumulator {
                 last: 0.0,
             };
         }
-        self.values
-            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let mean = (self.sum / count as f64) as f32;
-        let p50 = percentile(&self.values, 0.50);
-        let p95 = percentile(&self.values, 0.95);
+        let mean = (self.sum / self.count as f64) as f32;
+        let p50 = self.quantiles.query(0.50) as f32;
+        let p95 = self.quantiles.query(0.95) as f32;
         MetricStats {
-            count,
+            count: self.count,
             min: self.min,
             max: self.max,
             mean,
@@ -869,16 +998,18 @@ impl MetricAccumulator {
 
 #[derive(Default)]
 struct TelemetryAccumulator {
-    values: Vec<f64>,
+    quantiles: GkSummary,
     sum: f64,
     max: f64,
+    count: u64,
     initialized: bool,
 }
 
 impl TelemetryAccumulator {
     fn push(&mut self, value: f64) {
-        self.values.push(value);
+        self.quantiles.insert(value);
         self.sum += value;
+        self.count += 1;
         if !self.initialized {
             self.max = value;
             self.initialized = true;
@@ -889,9 +1020,8 @@ impl TelemetryAccumulator {
         }
     }
 
-    fn into_stats(mut self) -> TelemetryStats {
-        let count = self.values.len() as u64;
-        if count == 0 {
+    fn into_stats(self) -> TelemetryStats {
+        if self.count == 0 {
             return TelemetryStats {
                 count: 0,
                 mean_duration_ms: 0.0,
@@ -899,12 +1029,10 @@ impl TelemetryAccumulator {
                 max_duration_ms: 0.0,
             };
         }
-        self.values
-            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let mean_duration_ms = self.sum / count as f64;
-        let p95_duration_ms = percentile_f64(&self.values, 0.95);
+        let mean_duration_ms = self.sum / self.count as f64;
+        let p95_duration_ms = self.quantiles.query(0.95);
         TelemetryStats {
-            count,
+            count: self.count,
             mean_duration_ms,
             p95_duration_ms,
             max_duration_ms: self.max,
@@ -912,16 +1040,7 @@ impl TelemetryAccumulator {
     }
 }
 
-fn percentile(values: &[f32], percentile: f64) -> f32 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let clamped = percentile.clamp(0.0, 1.0);
-    let idx = ((values.len() - 1) as f64 * clamped).round() as usize;
-    values[idx]
-}
-
-fn percentile_f64(values: &[f64], percentile: f64) -> f64 {
+fn percentile_f64_exact(values: &[f64], percentile: f64) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
