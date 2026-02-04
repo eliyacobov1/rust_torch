@@ -18,20 +18,17 @@
 ---
 
 ## Project Status (Interview Readiness)
-- **Status:** Yes — architecture documentation and layout telemetry export now close the remaining senior-level gaps; follow-up items are optimization-focused.
+- **Status:** Yes — experiment run reporting is now CLI-addressable (list, summary, CSV export) with benchmark coverage; remaining gaps are incremental hardening.
 
 ## Minimal Gaps Checklist (100% Readiness)
-- [x] Expand algorithmic depth beyond linear regression (additional models/optimizers with formal complexity notes).
-- [x] Persist experiment summaries (metrics rollups + telemetry) to enable comparative analysis.
-- [x] Add architecture documentation detailing design patterns, concurrency model, and error boundaries.
-- [x] Persist layout validation telemetry into run summaries for observability of layout failures.
+- [ ] Add streaming quantiles (GK/TDigest) to avoid O(n) metric rollups for large runs.
+- [ ] Provide JSON/CSV schema validation for run summaries and exports to guard against partial writes.
+- [ ] Add a run comparison command that highlights metric deltas across selected runs.
 
 ## Follow-up Tasks (Post-Implementation)
-1. **Experiment CLI reporting**: add `rustorch_cli` commands to list runs, filter by tags, and export CSV summaries (including layout telemetry fields).
-2. **Streaming quantiles**: replace in-memory percentile calculations with streaming GK/TDigest for large runs.
-3. **Telemetry backpressure controls**: add queue saturation metrics and optional drop policies with alerts.
-4. **Classifier evaluation suite**: add validation metrics (accuracy/F1) and confusion matrix artifacts.
-5. **Run summary schema validation**: publish a JSON schema and validate summary files on write to guard against partial writes.
+1. **Run comparison reports**: CLI command to compare multiple runs with diff tables + deltas.
+2. **Summary rollup acceleration**: adopt streaming quantiles to reduce memory pressure on large metrics logs.
+3. **Export schema validation**: publish schema + validate CSV/JSON outputs for automation pipelines.
 
 ## Task 1 — Tensor Layout/Stride Semantics + Error Taxonomy
 **Goal:** deterministic layout behavior and structured failure modes.

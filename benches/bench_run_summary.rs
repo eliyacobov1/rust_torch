@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use rand::{distributions::Alphanumeric, Rng};
-use rustorch::experiment::ExperimentStore;
+use rustorch::experiment::{ExperimentStore, RunFilter};
 
 fn bench_run_summary(c: &mut Criterion) {
     let mut group = c.benchmark_group("run_summary");
@@ -13,6 +13,19 @@ fn bench_run_summary(c: &mut Criterion) {
             |run| {
                 run.write_summary(Some(Duration::from_millis(250)))
                     .expect("summary");
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    group.bench_function("export_csv_100_runs", |b| {
+        b.iter_batched(
+            || create_store_with_runs(100),
+            |store| {
+                let output = store.root().join("runs_summary.csv");
+                let filter = RunFilter::default();
+                store
+                    .export_run_summaries_csv(&output, &filter)
+                    .expect("export");
             },
             BatchSize::SmallInput,
         )
@@ -32,6 +45,26 @@ fn create_run_with_metrics(steps: usize) -> rustorch::experiment::RunHandle {
         run.log_metrics(step, metrics).expect("log metrics");
     }
     run
+}
+
+fn create_store_with_runs(count: usize) -> ExperimentStore {
+    let store = ExperimentStore::new(temp_root()).expect("store");
+    for idx in 0..count {
+        let mut run = store
+            .create_run(
+                &format!("run_{idx}"),
+                serde_json::json!({ "idx": idx }),
+                vec!["bench".to_string()],
+            )
+            .expect("run");
+        let mut metrics = BTreeMap::new();
+        metrics.insert("loss".to_string(), 1.0 / (idx as f32 + 1.0));
+        run.log_metrics(idx, metrics).expect("log metrics");
+        run.mark_completed().expect("mark completed");
+        run.write_summary(Some(Duration::from_millis(10)))
+            .expect("summary");
+    }
+    store
 }
 
 fn temp_root() -> std::path::PathBuf {
