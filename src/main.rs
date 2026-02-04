@@ -310,10 +310,12 @@ fn parse_status(value: String) -> Result<Vec<RunStatus>> {
 
 fn print_export_report(report: &CsvExportReport) {
     println!(
-        "exported {} runs to {} ({} bytes, {:.2} ms)",
+        "exported {} runs to {} ({} bytes, {:.2} ms, validated {} runs in {:.2} ms)",
         report.rows,
         report.output_path.display(),
         report.bytes_written,
-        report.duration_ms
+        report.duration_ms,
+        report.validation_checks,
+        report.validation_ms
     );
 }

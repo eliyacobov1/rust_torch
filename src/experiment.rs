@@ -144,6 +144,8 @@ pub struct CsvExportReport {
     pub rows: usize,
     pub bytes_written: u64,
     pub duration_ms: f64,
+    pub validation_checks: usize,
+    pub validation_ms: f64,
 }
 
 /// Configuration for asynchronous metrics logging.
@@ -292,6 +294,7 @@ impl ExperimentStore {
             config,
             tags,
         };
+        validate_run_metadata(&metadata)?;
         write_metadata(&run_dir, &metadata)?;
         info!("Created run {} ({})", metadata.id, metadata.name);
         Ok(RunHandle {
@@ -369,6 +372,11 @@ impl ExperimentStore {
     ) -> Result<CsvExportReport> {
         let start = Instant::now();
         let overviews = self.list_overviews(filter)?;
+        let validation_start = Instant::now();
+        for overview in &overviews {
+            validate_run_overview(overview)?;
+        }
+        let validation_ms = validation_start.elapsed().as_secs_f64() * 1000.0;
         let mut metric_names = BTreeSet::new();
         let mut telemetry_names = BTreeSet::new();
         for overview in &overviews {
@@ -394,6 +402,16 @@ impl ExperimentStore {
 
         for overview in &overviews {
             let row = build_csv_row(overview, &metric_names, &telemetry_names);
+            if row.len() != header.len() {
+                return Err(TorchError::Experiment {
+                    op: "experiment_store.export_run_summaries_csv",
+                    msg: format!(
+                        "csv row length mismatch (expected {}, got {})",
+                        header.len(),
+                        row.len()
+                    ),
+                });
+            }
             bytes_written += write_csv_row(&mut writer, &row)?;
         }
 
@@ -407,6 +425,8 @@ impl ExperimentStore {
             rows: overviews.len(),
             bytes_written: bytes_written as u64,
             duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+            validation_checks: overviews.len(),
+            validation_ms,
         })
     }
 }
@@ -619,6 +639,7 @@ fn summary_path(run_dir: &Path) -> PathBuf {
 }
 
 fn write_metadata(run_dir: &Path, metadata: &RunMetadata) -> Result<()> {
+    validate_run_metadata(metadata)?;
     let json = serde_json::to_string_pretty(metadata).map_err(|err| TorchError::Experiment {
         op: "experiment_store.write_metadata",
         msg: format!("failed to serialize metadata: {err}"),
@@ -631,6 +652,7 @@ fn write_metadata(run_dir: &Path, metadata: &RunMetadata) -> Result<()> {
 }
 
 fn write_summary(run_dir: &Path, summary: &RunSummary) -> Result<()> {
+    validate_run_summary(summary)?;
     let json = serde_json::to_string_pretty(summary).map_err(|err| TorchError::Experiment {
         op: "experiment_store.write_summary",
         msg: format!("failed to serialize summary: {err}"),
@@ -654,10 +676,13 @@ fn read_metadata(run_dir: &Path) -> Result<RunMetadata> {
             op: "experiment_store.read_metadata",
             msg: format!("failed to read {}: {err}", path.display()),
         })?;
-    serde_json::from_str(&buf).map_err(|err| TorchError::Experiment {
-        op: "experiment_store.read_metadata",
-        msg: format!("failed to parse metadata: {err}"),
-    })
+    let metadata: RunMetadata =
+        serde_json::from_str(&buf).map_err(|err| TorchError::Experiment {
+            op: "experiment_store.read_metadata",
+            msg: format!("failed to parse metadata: {err}"),
+        })?;
+    validate_run_metadata(&metadata)?;
+    Ok(metadata)
 }
 
 fn read_artifacts(path: &Path) -> Result<Vec<ArtifactRecord>> {
@@ -680,10 +705,12 @@ fn read_summary(run_dir: &Path) -> Result<RunSummary> {
         op: "experiment_store.read_summary",
         msg: format!("failed to read {}: {err}", path.display()),
     })?;
-    serde_json::from_str(&buf).map_err(|err| TorchError::Experiment {
+    let summary: RunSummary = serde_json::from_str(&buf).map_err(|err| TorchError::Experiment {
         op: "experiment_store.read_summary",
         msg: format!("failed to parse summary: {err}"),
-    })
+    })?;
+    validate_run_summary(&summary)?;
+    Ok(summary)
 }
 
 fn read_summary_optional(run_dir: &Path) -> Result<Option<RunSummary>> {
@@ -692,6 +719,277 @@ fn read_summary_optional(run_dir: &Path) -> Result<Option<RunSummary>> {
         return Ok(None);
     }
     read_summary(run_dir).map(Some)
+}
+
+fn validate_run_metadata(metadata: &RunMetadata) -> Result<()> {
+    if metadata.id.trim().is_empty() {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_metadata",
+            msg: "metadata.id is required".to_string(),
+        });
+    }
+    if metadata.name.trim().is_empty() {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_metadata",
+            msg: "metadata.name is required".to_string(),
+        });
+    }
+    if metadata.created_at_unix == 0 {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_metadata",
+            msg: "metadata.created_at_unix must be non-zero".to_string(),
+        });
+    }
+    if let RunStatus::Failed = metadata.status {
+        if metadata
+            .status_message
+            .as_ref()
+            .map(String::as_str)
+            .unwrap_or("")
+            .is_empty()
+        {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.validate_metadata",
+                msg: "metadata.status_message required when status is failed".to_string(),
+            });
+        }
+    }
+    if !metadata.config.is_object() {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_metadata",
+            msg: "metadata.config must be a JSON object".to_string(),
+        });
+    }
+    if metadata.tags.iter().any(|tag| tag.trim().is_empty()) {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_metadata",
+            msg: "metadata.tags cannot contain empty values".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_run_summary(summary: &RunSummary) -> Result<()> {
+    if summary.run_id.trim().is_empty() {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_summary",
+            msg: "summary.run_id is required".to_string(),
+        });
+    }
+    if summary.name.trim().is_empty() {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_summary",
+            msg: "summary.name is required".to_string(),
+        });
+    }
+    if summary.created_at_unix == 0 || summary.completed_at_unix == 0 {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_summary",
+            msg: "summary timestamps must be non-zero".to_string(),
+        });
+    }
+    if summary.completed_at_unix < summary.created_at_unix {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_summary",
+            msg: "summary.completed_at_unix must be >= created_at_unix".to_string(),
+        });
+    }
+    if let Some(duration) = summary.duration_secs {
+        if !duration.is_finite() || duration < 0.0 {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.validate_summary",
+                msg: "summary.duration_secs must be finite and non-negative".to_string(),
+            });
+        }
+    }
+    validate_metrics_summary(&summary.metrics)?;
+    if let Some(telemetry) = &summary.telemetry {
+        validate_telemetry_summary(telemetry)?;
+    }
+    validate_layout_summary(&summary.layout)?;
+    Ok(())
+}
+
+fn validate_metrics_summary(metrics: &MetricsSummary) -> Result<()> {
+    if metrics.total_records == 0 {
+        if metrics.first_step.is_some()
+            || metrics.last_step.is_some()
+            || metrics.first_timestamp_unix.is_some()
+            || metrics.last_timestamp_unix.is_some()
+            || !metrics.metrics.is_empty()
+        {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.validate_metrics_summary",
+                msg: "metrics summary contains data but total_records is zero".to_string(),
+            });
+        }
+        return Ok(());
+    }
+    if metrics.first_step.is_none()
+        || metrics.last_step.is_none()
+        || metrics.first_timestamp_unix.is_none()
+        || metrics.last_timestamp_unix.is_none()
+    {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_metrics_summary",
+            msg: "metrics summary missing step/timestamp bounds".to_string(),
+        });
+    }
+    if let (Some(first), Some(last)) = (metrics.first_step, metrics.last_step) {
+        if first > last {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.validate_metrics_summary",
+                msg: "metrics summary first_step must be <= last_step".to_string(),
+            });
+        }
+    }
+    for (name, stats) in &metrics.metrics {
+        if name.trim().is_empty() {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.validate_metrics_summary",
+                msg: "metrics summary contains empty metric name".to_string(),
+            });
+        }
+        validate_metric_stats(stats)?;
+    }
+    Ok(())
+}
+
+fn validate_metric_stats(stats: &MetricStats) -> Result<()> {
+    if stats.count == 0 {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_metric_stats",
+            msg: "metric stats count must be > 0".to_string(),
+        });
+    }
+    let values = [
+        stats.min, stats.max, stats.mean, stats.p50, stats.p95, stats.last,
+    ];
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_metric_stats",
+            msg: "metric stats must be finite".to_string(),
+        });
+    }
+    if stats.min > stats.max {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_metric_stats",
+            msg: "metric stats min must be <= max".to_string(),
+        });
+    }
+    if stats.mean < stats.min || stats.mean > stats.max {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_metric_stats",
+            msg: "metric stats mean must be within [min, max]".to_string(),
+        });
+    }
+    if stats.p50 < stats.min || stats.p50 > stats.max {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_metric_stats",
+            msg: "metric stats p50 must be within [min, max]".to_string(),
+        });
+    }
+    if stats.p95 < stats.min || stats.p95 > stats.max {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_metric_stats",
+            msg: "metric stats p95 must be within [min, max]".to_string(),
+        });
+    }
+    if stats.last < stats.min || stats.last > stats.max {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_metric_stats",
+            msg: "metric stats last must be within [min, max]".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_telemetry_summary(telemetry: &TelemetrySummary) -> Result<()> {
+    if telemetry.total_events == 0 && !telemetry.events.is_empty() {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_telemetry_summary",
+            msg: "telemetry summary contains events but total_events is zero".to_string(),
+        });
+    }
+    for (name, stats) in &telemetry.events {
+        if name.trim().is_empty() {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.validate_telemetry_summary",
+                msg: "telemetry summary contains empty event name".to_string(),
+            });
+        }
+        if stats.count == 0 {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.validate_telemetry_summary",
+                msg: "telemetry stats count must be > 0".to_string(),
+            });
+        }
+        let durations = [
+            stats.mean_duration_ms,
+            stats.p95_duration_ms,
+            stats.max_duration_ms,
+        ];
+        if durations
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.validate_telemetry_summary",
+                msg: "telemetry durations must be finite and non-negative".to_string(),
+            });
+        }
+        if stats.mean_duration_ms > stats.max_duration_ms
+            || stats.p95_duration_ms > stats.max_duration_ms
+        {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.validate_telemetry_summary",
+                msg: "telemetry max_duration_ms must be the max".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_layout_summary(layout: &LayoutSummary) -> Result<()> {
+    if layout.failures > layout.validations {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_layout_summary",
+            msg: "layout failures cannot exceed validations".to_string(),
+        });
+    }
+    if layout.overlap_failures > layout.failures {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_layout_summary",
+            msg: "layout overlap_failures cannot exceed failures".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_run_overview(overview: &RunOverview) -> Result<()> {
+    validate_run_metadata(&overview.metadata)?;
+    if let Some(summary) = &overview.summary {
+        validate_run_summary(summary)?;
+        if summary.run_id != overview.metadata.id {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.validate_overview",
+                msg: "summary run_id does not match metadata id".to_string(),
+            });
+        }
+        if summary.name != overview.metadata.name {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.validate_overview",
+                msg: "summary name does not match metadata name".to_string(),
+            });
+        }
+        if summary.status != overview.metadata.status {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.validate_overview",
+                msg: "summary status does not match metadata status".to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn summarize_metrics(path: &Path) -> Result<MetricsSummary> {
@@ -856,25 +1154,14 @@ impl GkSummary {
                 .collect();
         }
 
-        let insert_idx = self
-            .entries
-            .partition_point(|entry| entry.value < value);
+        let insert_idx = self.entries.partition_point(|entry| entry.value < value);
         let delta = if insert_idx == 0 || insert_idx == self.entries.len() {
             0
         } else {
-            ((2.0 * self.epsilon * self.count as f64)
-                .floor()
-                .max(0.0) as u64)
-                .saturating_sub(1)
+            ((2.0 * self.epsilon * self.count as f64).floor().max(0.0) as u64).saturating_sub(1)
         };
-        self.entries.insert(
-            insert_idx,
-            GkEntry {
-                value,
-                g: 1,
-                delta,
-            },
-        );
+        self.entries
+            .insert(insert_idx, GkEntry { value, g: 1, delta });
         self.compress();
     }
 
@@ -930,10 +1217,7 @@ impl GkSummary {
                 return entry.value;
             }
         }
-        self.entries
-            .last()
-            .map(|entry| entry.value)
-            .unwrap_or(0.0)
+        self.entries.last().map(|entry| entry.value).unwrap_or(0.0)
     }
 }
 

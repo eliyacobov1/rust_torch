@@ -67,11 +67,7 @@ fn metrics_summary_uses_streaming_quantiles() {
     }
     run.mark_completed().expect("mark completed");
     let summary = run.write_summary(None).expect("summary");
-    let stats = summary
-        .metrics
-        .metrics
-        .get("loss")
-        .expect("loss stats");
+    let stats = summary.metrics.metrics.get("loss").expect("loss stats");
     assert!((stats.p50 - 50.0).abs() <= 2.0);
     assert!((stats.p95 - 95.0).abs() <= 5.0);
     assert_eq!(stats.count, 100);
