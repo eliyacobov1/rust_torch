@@ -727,30 +727,24 @@ impl TensorInner {
                 });
             }
             if dim > 0 {
-                let span =
-                    (dim - 1)
-                        .checked_mul(stride)
-                        .ok_or_else(|| {
-                            LAYOUT_FAILURES.fetch_add(1, Ordering::Relaxed);
-                            TorchError::InvalidLayout {
-                                op,
-                                shape: shape.to_vec(),
-                                strides: strides.to_vec(),
-                                msg: "layout span overflow".to_string(),
-                            }
-                        })?;
-                required_len =
-                    required_len
-                        .checked_add(span)
-                        .ok_or_else(|| {
-                            LAYOUT_FAILURES.fetch_add(1, Ordering::Relaxed);
-                            TorchError::InvalidLayout {
-                                op,
-                                shape: shape.to_vec(),
-                                strides: strides.to_vec(),
-                                msg: "layout span overflow".to_string(),
-                            }
-                        })?;
+                let span = (dim - 1).checked_mul(stride).ok_or_else(|| {
+                    LAYOUT_FAILURES.fetch_add(1, Ordering::Relaxed);
+                    TorchError::InvalidLayout {
+                        op,
+                        shape: shape.to_vec(),
+                        strides: strides.to_vec(),
+                        msg: "layout span overflow".to_string(),
+                    }
+                })?;
+                required_len = required_len.checked_add(span).ok_or_else(|| {
+                    LAYOUT_FAILURES.fetch_add(1, Ordering::Relaxed);
+                    TorchError::InvalidLayout {
+                        op,
+                        shape: shape.to_vec(),
+                        strides: strides.to_vec(),
+                        msg: "layout span overflow".to_string(),
+                    }
+                })?;
             }
         }
         if storage_len != required_len {
@@ -772,13 +766,15 @@ impl TensorInner {
         let mut ordered_dims: Vec<(usize, usize)> = shape
             .iter()
             .zip(strides.iter())
-            .filter_map(|(&dim, &stride)| {
-                if dim > 1 {
-                    Some((stride, dim))
-                } else {
-                    None
-                }
-            })
+            .filter_map(
+                |(&dim, &stride)| {
+                    if dim > 1 {
+                        Some((stride, dim))
+                    } else {
+                        None
+                    }
+                },
+            )
             .collect();
         ordered_dims.sort_by_key(|(stride, _)| *stride);
         let mut block: usize = 1;
@@ -789,22 +785,18 @@ impl TensorInner {
                     op,
                     shape: shape.to_vec(),
                     strides: strides.to_vec(),
-                    msg: format!(
-                        "stride {stride} is smaller than required block size {block}"
-                    ),
+                    msg: format!("stride {stride} is smaller than required block size {block}"),
                 });
             }
-            block = block
-                .checked_mul(dim)
-                .ok_or_else(|| {
-                    LAYOUT_FAILURES.fetch_add(1, Ordering::Relaxed);
-                    TorchError::InvalidLayout {
-                        op,
-                        shape: shape.to_vec(),
-                        strides: strides.to_vec(),
-                        msg: "layout span overflow".to_string(),
-                    }
-                })?;
+            block = block.checked_mul(dim).ok_or_else(|| {
+                LAYOUT_FAILURES.fetch_add(1, Ordering::Relaxed);
+                TorchError::InvalidLayout {
+                    op,
+                    shape: shape.to_vec(),
+                    strides: strides.to_vec(),
+                    msg: "layout span overflow".to_string(),
+                }
+            })?;
         }
         Ok(())
     }
