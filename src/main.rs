@@ -1,8 +1,8 @@
 use std::env;
 
 use rustorch::api::RustorchService;
-use rustorch::data::SyntheticRegressionConfig;
-use rustorch::training::TrainerConfig;
+use rustorch::data::{SyntheticClassificationConfig, SyntheticRegressionConfig};
+use rustorch::training::{ClassificationTrainerConfig, TrainerConfig};
 use rustorch::{Result, TorchError};
 
 fn main() {
@@ -21,6 +21,7 @@ fn run() -> Result<()> {
 
     match args[1].as_str() {
         "train-linear" => run_train_linear(&args[2..]),
+        "train-mlp" => run_train_mlp(&args[2..]),
         "--help" | "-h" => {
             print_usage();
             Ok(())
@@ -79,9 +80,64 @@ fn run_train_linear(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn run_train_mlp(args: &[String]) -> Result<()> {
+    let parser = ArgParser::new(args);
+    let runs_dir = parser
+        .get("runs-dir")?
+        .unwrap_or_else(|| "runs".to_string());
+    let samples = parser.get_usize("samples")?.unwrap_or(256);
+    let features = parser.get_usize("features")?.unwrap_or(4);
+    let classes = parser.get_usize("classes")?.unwrap_or(3);
+    let hidden = parser.get_usize("hidden")?.unwrap_or(16);
+    let epochs = parser.get_usize("epochs")?.unwrap_or(12);
+    let batch_size = parser.get_usize("batch-size")?.unwrap_or(32);
+    let learning_rate = parser.get_f32("lr")?.unwrap_or(5e-2);
+    let weight_decay = parser.get_f32("weight-decay")?.unwrap_or(0.0);
+    let seed = parser.get_u64("seed")?.unwrap_or(7);
+    let run_name = parser
+        .get("run-name")?
+        .unwrap_or_else(|| "mlp_classifier".to_string());
+
+    let data_config = SyntheticClassificationConfig {
+        samples,
+        features,
+        classes,
+        cluster_std: parser.get_f32("cluster-std")?.unwrap_or(0.35),
+        seed,
+    };
+    let trainer_config = ClassificationTrainerConfig {
+        epochs,
+        batch_size,
+        learning_rate,
+        weight_decay,
+        log_every: parser.get_usize("log-every")?.unwrap_or(10),
+        checkpoint_every: parser.get_usize("checkpoint-every")?.unwrap_or(1),
+        run_name,
+        tags: vec![
+            "synthetic".to_string(),
+            "mlp".to_string(),
+            "classification".to_string(),
+        ],
+    };
+
+    let service = RustorchService::new(runs_dir)?;
+    let report =
+        service.train_synthetic_classification(data_config, trainer_config, hidden, seed)?;
+    println!(
+        "run {} completed: steps={}, final_loss={}, best_loss={}, final_accuracy={}, best_accuracy={}",
+        report.report.run_id,
+        report.report.total_steps,
+        report.report.final_loss,
+        report.report.best_loss,
+        report.report.final_accuracy,
+        report.report.best_accuracy
+    );
+    Ok(())
+}
+
 fn print_usage() {
     println!(
-        "rustorch_cli\n\nUSAGE:\n  rustorch_cli train-linear [options]\n\nOPTIONS:\n  --runs-dir <path>        Directory for experiment runs (default: runs)\n  --samples <n>            Number of samples (default: 128)\n  --features <n>           Number of input features (default: 4)\n  --targets <n>            Number of output targets (default: 1)\n  --epochs <n>             Training epochs (default: 10)\n  --batch-size <n>         Batch size (default: 16)\n  --lr <f>                 Learning rate (default: 1e-2)\n  --weight-decay <f>       Weight decay (default: 0)\n  --noise <f>              Noise stddev for synthetic data (default: 0.05)\n  --seed <n>               RNG seed (default: 42)\n  --run-name <name>        Run name label\n  --log-every <n>          Log metrics every n steps (default: 10)\n  --checkpoint-every <n>   Save checkpoint every n epochs (default: 1)\n  -h, --help               Print this help text\n"
+        "rustorch_cli\n\nUSAGE:\n  rustorch_cli train-linear [options]\n  rustorch_cli train-mlp [options]\n\nOPTIONS (shared):\n  --runs-dir <path>        Directory for experiment runs (default: runs)\n  --samples <n>            Number of samples (default: 128)\n  --features <n>           Number of input features (default: 4)\n  --epochs <n>             Training epochs (default: 10)\n  --batch-size <n>         Batch size (default: 16)\n  --lr <f>                 Learning rate (default: 1e-2)\n  --weight-decay <f>       Weight decay (default: 0)\n  --seed <n>               RNG seed (default: 42)\n  --run-name <name>        Run name label\n  --log-every <n>          Log metrics every n steps (default: 10)\n  --checkpoint-every <n>   Save checkpoint every n epochs (default: 1)\n\nOPTIONS (train-linear):\n  --targets <n>            Number of output targets (default: 1)\n  --noise <f>              Noise stddev for synthetic data (default: 0.05)\n\nOPTIONS (train-mlp):\n  --classes <n>            Number of classes (default: 3)\n  --hidden <n>             Hidden layer size (default: 16)\n  --cluster-std <f>        Cluster stddev for synthetic data (default: 0.35)\n  -h, --help               Print this help text\n"
     );
 }
 

@@ -117,10 +117,10 @@
 - Autograd parallelism currently uses scoped threads per batch; consider a shared worker pool to reduce scheduling overhead.
 
 ## Project Status (Interview Readiness)
-- **Status:** Partial — strong Rust core + autograd/telemetry foundations, but still missing deeper algorithmic breadth and production-grade observability coverage for multi-run analysis.
+- **Status:** Partial — algorithmic breadth now includes a multi-layer classifier and synthetic classification training loop, but multi-run observability exports and architecture docs remain incomplete.
 
 ## Minimal Gaps Checklist (100% Readiness)
-- [ ] Expand algorithmic depth beyond linear regression (e.g., additional models and optimizers with complexity notes).
+- [x] Expand algorithmic depth beyond linear regression (e.g., additional models and optimizers with complexity notes).
 - [ ] Add end-to-end observability export (metrics + telemetry) into experiment summaries for multi-run analysis.
 - [ ] Provide architecture doc(s) showing design patterns, threading model, and error boundaries.
 
@@ -128,3 +128,5 @@
 1. **Metrics rollups + summaries**: add per-run aggregation (p50/p95 loss, throughput) and persist in `run.json`.
 2. **Experiment CLI reporting**: add `rustorch_cli` commands to list runs, filter by tags, and export CSV.
 3. **Telemetry backpressure controls**: add queue saturation metrics and optional drop policies with alerts.
+4. **Classifier evaluation suite**: add held-out validation metrics (accuracy/F1) and confusion matrix artifacts for classification workloads.
+5. **Optimizer diversity**: add AdamW + momentum to broaden optimization coverage and include complexity notes.

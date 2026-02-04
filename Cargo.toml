@@ -40,6 +40,10 @@ harness = false
 name = "bench_metrics_logger"
 harness = false
 
+[[bench]]
+name = "bench_mlp_classifier"
+harness = false
+
 [[bin]]
 name = "rustorch_cli"
 path = "src/main.rs"
