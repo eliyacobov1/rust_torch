@@ -117,16 +117,17 @@
 - Autograd parallelism currently uses scoped threads per batch; consider a shared worker pool to reduce scheduling overhead.
 
 ## Project Status (Interview Readiness)
-- **Status:** Partial — algorithmic depth and run summaries are now stronger with persisted metric/telemetry rollups, but architecture documentation remains incomplete.
+- **Status:** Yes — architecture documentation and layout telemetry export now close the remaining senior-level gaps; follow-up items are optimization-focused.
 
 ## Minimal Gaps Checklist (100% Readiness)
 - [x] Expand algorithmic depth beyond linear regression (e.g., additional models and optimizers with complexity notes).
 - [x] Add end-to-end observability export (metrics + telemetry) into experiment summaries for multi-run analysis.
-- [ ] Provide architecture doc(s) showing design patterns, threading model, and error boundaries.
+- [x] Provide architecture doc(s) showing design patterns, threading model, and error boundaries.
+- [x] Persist layout validation telemetry into run summaries for observability of layout failures.
 
 ## Follow-up Tasks (Post-Implementation)
-1. **Experiment CLI reporting**: add `rustorch_cli` commands to list runs, filter by tags, and export CSV summaries.
+1. **Experiment CLI reporting**: add `rustorch_cli` commands to list runs, filter by tags, and export CSV summaries (including layout telemetry fields).
 2. **Streaming quantiles**: replace in-memory percentile calculations with streaming GK/TDigest for large runs.
 3. **Telemetry backpressure controls**: add queue saturation metrics and optional drop policies with alerts.
 4. **Classifier evaluation suite**: add held-out validation metrics (accuracy/F1) and confusion matrix artifacts for classification workloads.
-5. **Optimizer diversity**: add AdamW + momentum to broaden optimization coverage and include complexity notes.
+5. **Run summary schema validation**: publish a JSON schema and validate summary files on write to guard against partial writes.

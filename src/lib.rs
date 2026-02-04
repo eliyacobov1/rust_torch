@@ -22,8 +22,9 @@ pub use data::{
 };
 pub use error::{Result, TorchError};
 pub use experiment::{
-    ExperimentStore, MetricStats, MetricsLogger, MetricsLoggerConfig, MetricsSummary, RunHandle,
-    RunMetadata, RunStatus, RunSummary, TelemetryStats, TelemetrySummary,
+    ExperimentStore, LayoutSummary, MetricStats, MetricsLogger, MetricsLoggerConfig,
+    MetricsSummary, RunHandle, RunMetadata, RunStatus, RunSummary, TelemetryStats,
+    TelemetrySummary,
 };
 pub use models::{LinearRegression, MlpClassifier};
 pub use optim::{Optimizer, Sgd};
