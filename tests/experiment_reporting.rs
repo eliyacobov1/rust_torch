@@ -53,3 +53,26 @@ fn list_overviews_filters_and_exports_csv() {
     assert!(csv.contains("metric.loss.mean"));
     assert!(csv.contains(&run.metadata().id));
 }
+
+#[test]
+fn metrics_summary_uses_streaming_quantiles() {
+    let store = ExperimentStore::new(temp_root()).expect("store");
+    let mut run = store
+        .create_run("quantile_run", serde_json::json!({}), Vec::new())
+        .expect("run");
+    for step in 1..=100 {
+        let mut metrics = BTreeMap::new();
+        metrics.insert("loss".to_string(), step as f32);
+        run.log_metrics(step, metrics).expect("log metrics");
+    }
+    run.mark_completed().expect("mark completed");
+    let summary = run.write_summary(None).expect("summary");
+    let stats = summary
+        .metrics
+        .metrics
+        .get("loss")
+        .expect("loss stats");
+    assert!((stats.p50 - 50.0).abs() <= 2.0);
+    assert!((stats.p95 - 95.0).abs() <= 5.0);
+    assert_eq!(stats.count, 100);
+}
