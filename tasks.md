@@ -18,19 +18,20 @@
 ---
 
 ## Project Status (Interview Readiness)
-- **Status:** Partial — core Rust/autograd infrastructure is strong, and run summaries now persist metric/telemetry rollups, but architecture documentation remains incomplete.
+- **Status:** Yes — architecture documentation and layout telemetry export now close the remaining senior-level gaps; follow-up items are optimization-focused.
 
 ## Minimal Gaps Checklist (100% Readiness)
 - [x] Expand algorithmic depth beyond linear regression (additional models/optimizers with formal complexity notes).
 - [x] Persist experiment summaries (metrics rollups + telemetry) to enable comparative analysis.
-- [ ] Add architecture documentation detailing design patterns, concurrency model, and error boundaries.
+- [x] Add architecture documentation detailing design patterns, concurrency model, and error boundaries.
+- [x] Persist layout validation telemetry into run summaries for observability of layout failures.
 
 ## Follow-up Tasks (Post-Implementation)
-1. **Experiment CLI reporting**: add `rustorch_cli` commands to list runs, filter by tags, and export CSV summaries.
+1. **Experiment CLI reporting**: add `rustorch_cli` commands to list runs, filter by tags, and export CSV summaries (including layout telemetry fields).
 2. **Streaming quantiles**: replace in-memory percentile calculations with streaming GK/TDigest for large runs.
 3. **Telemetry backpressure controls**: add queue saturation metrics and optional drop policies with alerts.
 4. **Classifier evaluation suite**: add validation metrics (accuracy/F1) and confusion matrix artifacts.
-5. **Optimizer diversity**: add AdamW + momentum and document complexity tradeoffs.
+5. **Run summary schema validation**: publish a JSON schema and validate summary files on write to guard against partial writes.
 
 ## Task 1 — Tensor Layout/Stride Semantics + Error Taxonomy
 **Goal:** deterministic layout behavior and structured failure modes.

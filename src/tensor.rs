@@ -101,6 +101,12 @@ pub fn layout_stats() -> LayoutStats {
     }
 }
 
+pub fn reset_layout_stats() {
+    LAYOUT_VALIDATIONS.store(0, Ordering::Relaxed);
+    LAYOUT_FAILURES.store(0, Ordering::Relaxed);
+    LAYOUT_OVERLAP_FAILURES.store(0, Ordering::Relaxed);
+}
+
 #[derive(Serialize, Deserialize)]
 struct TensorSerde {
     data: Vec<f32>,

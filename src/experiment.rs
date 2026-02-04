@@ -15,6 +15,7 @@ use serde_json::Value;
 use crate::checkpoint::{save_state_dict, StateDict};
 use crate::error::{Result, TorchError};
 use crate::telemetry::{JsonlSink, TelemetryEvent, TelemetryRecorder};
+use crate::tensor::{layout_stats, reset_layout_stats};
 
 /// High-level status for an experiment run stored on disk.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -83,6 +84,14 @@ pub struct TelemetrySummary {
     pub events: BTreeMap<String, TelemetryStats>,
 }
 
+/// Rollup summary for tensor layout validation telemetry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayoutSummary {
+    pub validations: u64,
+    pub failures: u64,
+    pub overlap_failures: u64,
+}
+
 /// Summary persisted after training completes for comparative analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunSummary {
@@ -95,6 +104,7 @@ pub struct RunSummary {
     pub duration_secs: Option<f64>,
     pub metrics: MetricsSummary,
     pub telemetry: Option<TelemetrySummary>,
+    pub layout: LayoutSummary,
 }
 
 /// Configuration for asynchronous metrics logging.
@@ -227,6 +237,7 @@ impl ExperimentStore {
 
     /// Create a new run directory with metadata persisted to disk.
     pub fn create_run(&self, name: &str, config: Value, tags: Vec<String>) -> Result<RunHandle> {
+        reset_layout_stats();
         let run_id = generate_run_id(name)?;
         let run_dir = self.root.join(&run_id);
         fs::create_dir_all(&run_dir).map_err(|err| TorchError::Experiment {
@@ -437,6 +448,7 @@ impl RunHandle {
         let telemetry_path = run_dir.join("telemetry.jsonl");
         let metrics = summarize_metrics(&metrics_path)?;
         let telemetry = summarize_telemetry(&telemetry_path)?;
+        let layout = summarize_layout();
         let summary = RunSummary {
             run_id: self.metadata.id.clone(),
             name: self.metadata.name.clone(),
@@ -447,6 +459,7 @@ impl RunHandle {
             duration_secs: duration.map(|d| d.as_secs_f64()),
             metrics,
             telemetry,
+            layout,
         };
         write_summary(&run_dir, &summary)?;
         Ok(summary)
@@ -655,6 +668,15 @@ fn summarize_telemetry(path: &Path) -> Result<Option<TelemetrySummary>> {
         total_events,
         events,
     }))
+}
+
+fn summarize_layout() -> LayoutSummary {
+    let stats = layout_stats();
+    LayoutSummary {
+        validations: stats.validations,
+        failures: stats.failures,
+        overlap_failures: stats.overlap_failures,
+    }
 }
 
 #[derive(Default)]
