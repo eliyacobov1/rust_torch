@@ -92,6 +92,96 @@ impl<'a> Iterator for TensorBatchIter<'a> {
     }
 }
 
+/// Dataset for classification tasks with integer class labels.
+#[derive(Debug, Clone)]
+pub struct ClassificationDataset {
+    features: Tensor,
+    labels: Tensor,
+    len: usize,
+}
+
+impl ClassificationDataset {
+    /// Create a dataset from feature tensors and 1D label tensors.
+    pub fn new(features: Tensor, labels: Tensor) -> Result<Self> {
+        validate_classification_pair(&features, &labels, "classification_dataset.new")?;
+        let len = features.shape()[0];
+        Ok(Self {
+            features,
+            labels,
+            len,
+        })
+    }
+
+    /// Number of samples in the dataset.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Access the feature tensor.
+    pub fn features(&self) -> &Tensor {
+        &self.features
+    }
+
+    /// Access the label tensor.
+    pub fn labels(&self) -> &Tensor {
+        &self.labels
+    }
+
+    /// Create an iterator over mini-batches.
+    pub fn batch_iter(&self, batch_size: usize) -> Result<ClassificationBatchIter<'_>> {
+        if batch_size == 0 {
+            return Err(TorchError::Data {
+                op: "classification_dataset.batch_iter",
+                msg: "batch_size must be > 0".to_string(),
+            });
+        }
+        Ok(ClassificationBatchIter {
+            dataset: self,
+            batch_size,
+            cursor: 0,
+        })
+    }
+}
+
+/// Batch payload for classification tasks.
+#[derive(Debug)]
+pub struct ClassificationBatch {
+    pub index: usize,
+    pub features: Tensor,
+    pub targets: Tensor,
+}
+
+/// Iterator that materializes batches for classification datasets.
+pub struct ClassificationBatchIter<'a> {
+    dataset: &'a ClassificationDataset,
+    batch_size: usize,
+    cursor: usize,
+}
+
+impl<'a> Iterator for ClassificationBatchIter<'a> {
+    type Item = Result<ClassificationBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor >= self.dataset.len {
+            return None;
+        }
+        let start = self.cursor;
+        let end = (self.cursor + self.batch_size).min(self.dataset.len);
+        self.cursor = end;
+        let batch_index = start / self.batch_size;
+
+        Some(
+            build_classification_batch(self.dataset, start, end).map(|(features, targets)| {
+                ClassificationBatch {
+                    index: batch_index,
+                    features,
+                    targets,
+                }
+            }),
+        )
+    }
+}
+
 /// Configuration for generating synthetic regression data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyntheticRegressionConfig {
@@ -108,6 +198,23 @@ pub struct RegressionData {
     pub dataset: TensorDataset,
     pub true_weights: Tensor,
     pub true_bias: Tensor,
+}
+
+/// Configuration for generating synthetic classification data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyntheticClassificationConfig {
+    pub samples: usize,
+    pub features: usize,
+    pub classes: usize,
+    pub cluster_std: f32,
+    pub seed: u64,
+}
+
+/// Synthetic classification dataset with class centroids.
+#[derive(Debug, Clone)]
+pub struct ClassificationData {
+    pub dataset: ClassificationDataset,
+    pub centroids: Tensor,
 }
 
 /// Generate synthetic regression data (y = xW + b + noise).
@@ -162,6 +269,53 @@ pub fn make_synthetic_regression(config: &SyntheticRegressionConfig) -> Result<R
     })
 }
 
+/// Generate synthetic classification data using Gaussian clusters.
+pub fn make_synthetic_classification(
+    config: &SyntheticClassificationConfig,
+) -> Result<ClassificationData> {
+    if config.samples == 0 || config.features == 0 || config.classes == 0 {
+        return Err(TorchError::Data {
+            op: "make_synthetic_classification",
+            msg: "samples/features/classes must be > 0".to_string(),
+        });
+    }
+    if config.cluster_std <= 0.0 {
+        return Err(TorchError::Data {
+            op: "make_synthetic_classification",
+            msg: "cluster_std must be > 0".to_string(),
+        });
+    }
+    let mut rng = StdRng::seed_from_u64(config.seed);
+
+    let mut centroids = Vec::with_capacity(config.classes * config.features);
+    for _ in 0..centroids.capacity() {
+        centroids.push(rng.gen_range(-1.0..1.0));
+    }
+
+    let mut features = Vec::with_capacity(config.samples * config.features);
+    let mut labels = Vec::with_capacity(config.samples);
+    for _ in 0..config.samples {
+        let class = rng.gen_range(0..config.classes);
+        labels.push(class as f32);
+        for j in 0..config.features {
+            let mean = centroids[class * config.features + j];
+            let noise = rng.gen_range(-config.cluster_std..config.cluster_std);
+            features.push(mean + noise);
+        }
+    }
+
+    let features_tensor =
+        Tensor::from_vec_f32(features, &[config.samples, config.features], None, false);
+    let labels_tensor = Tensor::from_vec_f32(labels, &[config.samples], None, false);
+    let dataset = ClassificationDataset::new(features_tensor, labels_tensor)?;
+    let centroids_tensor =
+        Tensor::from_vec_f32(centroids, &[config.classes, config.features], None, false);
+    Ok(ClassificationData {
+        dataset,
+        centroids: centroids_tensor,
+    })
+}
+
 fn validate_pair(features: &Tensor, targets: &Tensor, op: &'static str) -> Result<()> {
     features.validate_layout(op)?;
     targets.validate_layout(op)?;
@@ -184,10 +338,51 @@ fn validate_pair(features: &Tensor, targets: &Tensor, op: &'static str) -> Resul
     Ok(())
 }
 
+fn validate_classification_pair(
+    features: &Tensor,
+    labels: &Tensor,
+    op: &'static str,
+) -> Result<()> {
+    features.validate_layout(op)?;
+    labels.validate_layout(op)?;
+    if features.shape().len() != 2 || labels.shape().len() != 1 {
+        return Err(TorchError::Data {
+            op,
+            msg: "features must be 2D and labels must be 1D".to_string(),
+        });
+    }
+    if features.shape()[0] != labels.shape()[0] {
+        return Err(TorchError::Data {
+            op,
+            msg: format!(
+                "features and labels must share sample dimension ({} vs {})",
+                features.shape()[0],
+                labels.shape()[0]
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn build_batch(dataset: &TensorDataset, start: usize, end: usize) -> Result<(Tensor, Tensor)> {
     let features = slice_rows(dataset.features(), start, end, "tensor_dataset.batch")?;
     let targets = slice_rows(dataset.targets(), start, end, "tensor_dataset.batch")?;
     Ok((features, targets))
+}
+
+fn build_classification_batch(
+    dataset: &ClassificationDataset,
+    start: usize,
+    end: usize,
+) -> Result<(Tensor, Tensor)> {
+    let features = slice_rows(
+        dataset.features(),
+        start,
+        end,
+        "classification_dataset.batch",
+    )?;
+    let labels = slice_labels(dataset.labels(), start, end, "classification_dataset.batch")?;
+    Ok((features, labels))
 }
 
 fn slice_rows(tensor: &Tensor, start: usize, end: usize, op: &'static str) -> Result<Tensor> {
@@ -219,6 +414,37 @@ fn slice_rows(tensor: &Tensor, start: usize, end: usize, op: &'static str) -> Re
     Ok(Tensor::from_vec_f32(
         data,
         &[end - start, cols],
+        None,
+        tensor.requires_grad(),
+    ))
+}
+
+fn slice_labels(tensor: &Tensor, start: usize, end: usize, op: &'static str) -> Result<Tensor> {
+    tensor.validate_layout(op)?;
+    let shape = tensor.shape();
+    if shape.len() != 1 {
+        return Err(TorchError::Data {
+            op,
+            msg: "slice_labels requires a 1D tensor".to_string(),
+        });
+    }
+    if start >= end || end > shape[0] {
+        return Err(TorchError::Data {
+            op,
+            msg: format!("invalid slice rows {start}..{end} for len {}", shape[0]),
+        });
+    }
+    let storage = tensor.storage();
+    if end > storage.data.len() {
+        return Err(TorchError::Data {
+            op,
+            msg: "slice_labels out of storage bounds".to_string(),
+        });
+    }
+    let data = storage.data[start..end].to_vec();
+    Ok(Tensor::from_vec_f32(
+        data,
+        &[end - start],
         None,
         tensor.requires_grad(),
     ))

@@ -64,7 +64,7 @@ impl Default for MetricsLoggerConfig {
 
 enum MetricsMessage {
     Record(MetricRecord),
-    Flush,
+    Flush(mpsc::Sender<Result<()>>),
     Shutdown,
 }
 
@@ -95,12 +95,17 @@ impl MetricsLogger {
 
     pub fn flush(&self) -> Result<()> {
         self.check_error()?;
+        let (sender, receiver) = mpsc::channel();
         self.sender
-            .send(MetricsMessage::Flush)
+            .send(MetricsMessage::Flush(sender))
             .map_err(|err| TorchError::Experiment {
                 op: "metrics_logger.flush",
                 msg: format!("failed to signal flush: {err}"),
-            })
+            })?;
+        receiver.recv().map_err(|err| TorchError::Experiment {
+            op: "metrics_logger.flush",
+            msg: format!("failed to await flush: {err}"),
+        })?
     }
 
     fn check_error(&self) -> Result<()> {
@@ -485,13 +490,13 @@ fn spawn_metrics_worker(
                             }
                         }
                     }
-                    MetricsMessage::Flush => {
-                        if let Err(err) =
-                            flush_metrics(&mut writer, &mut buffer, &config, telemetry.as_ref())
-                        {
-                            record_logger_error(&error, err);
-                            break;
+                    MetricsMessage::Flush(sender) => {
+                        let result =
+                            flush_metrics(&mut writer, &mut buffer, &config, telemetry.as_ref());
+                        if let Err(err) = result.as_ref() {
+                            record_logger_error(&error, err.clone());
                         }
+                        let _ = sender.send(result);
                     }
                     MetricsMessage::Shutdown => {
                         let _ =

@@ -1,6 +1,12 @@
 mod common;
 
-use rustorch::{ops, tensor::Tensor};
+use rustorch::{
+    autograd,
+    data::{make_synthetic_classification, SyntheticClassificationConfig},
+    models::MlpClassifier,
+    ops,
+    tensor::Tensor,
+};
 
 use common::{assert_approx_eq, clone_data, matmul, transpose};
 
@@ -56,4 +62,37 @@ fn manual_backprop_pipeline_matches_manual_gradients() {
     assert_approx_eq(&grad_weight.data, grad_weight_expected.as_slice(), 1e-5);
     assert_approx_eq(&grad_a.data, grad_a_expected.as_slice(), 1e-5);
     assert_approx_eq(&grad_b.data, grad_b_expected.as_slice(), 1e-5);
+}
+
+#[test]
+fn mlp_classifier_backward_produces_gradients() {
+    let config = SyntheticClassificationConfig {
+        samples: 8,
+        features: 3,
+        classes: 2,
+        cluster_std: 0.2,
+        seed: 7,
+    };
+    let data = make_synthetic_classification(&config).expect("classification data");
+    let mut model = MlpClassifier::new(3, 4, 2, 11).expect("model");
+    let batch = data
+        .dataset
+        .batch_iter(8)
+        .expect("batch iter")
+        .next()
+        .expect("batch")
+        .expect("batch ok");
+
+    let log_probs = model.forward(&batch.features).expect("forward");
+    let loss = ops::nll_loss(&log_probs, &batch.targets);
+    let _stats = autograd::backward(&loss).expect("backward");
+
+    let params = model.parameters_mut();
+    for param in params.iter() {
+        assert!(
+            param.tensor.grad().is_some(),
+            "missing grad for {}",
+            param.name
+        );
+    }
 }
