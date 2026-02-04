@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -118,22 +119,26 @@ impl Trainer {
         model: &mut LinearRegression,
         dataset: &TensorDataset,
     ) -> Result<TrainingReport> {
+        let start = Instant::now();
         let mut run = self.store.create_run(
             &self.config.run_name,
             self.config.to_json(),
             self.config.tags.clone(),
         )?;
-        let report = match self.train_inner(model, dataset, &mut run) {
+        match self.train_inner(model, dataset, &mut run) {
             Ok(report) => {
                 run.mark_completed()?;
-                report
+                run.write_summary(Some(start.elapsed()))?;
+                Ok(report)
             }
             Err(err) => {
                 run.mark_failed(err.to_string())?;
-                return Err(err);
+                if let Err(summary_err) = run.write_summary(Some(start.elapsed())) {
+                    warn!("failed to write run summary: {summary_err}");
+                }
+                Err(err)
             }
-        };
-        Ok(report)
+        }
     }
 
     fn train_inner(
@@ -143,7 +148,14 @@ impl Trainer {
         run: &mut crate::experiment::RunHandle,
     ) -> Result<TrainingReport> {
         let telemetry = match jsonl_recorder_from_env("RUSTORCH_RUN_TELEMETRY") {
-            Ok(recorder) => recorder.map(Arc::new),
+            Ok(Some(recorder)) => Some(Arc::new(recorder)),
+            Ok(None) => match run.create_telemetry_recorder() {
+                Ok(recorder) => Some(Arc::new(recorder)),
+                Err(err) => {
+                    warn!("run telemetry disabled: {err:?}");
+                    None
+                }
+            },
             Err(err) => {
                 warn!("run telemetry disabled: {err:?}");
                 None
@@ -262,22 +274,26 @@ impl ClassificationTrainer {
         model: &mut MlpClassifier,
         dataset: &ClassificationDataset,
     ) -> Result<ClassificationReport> {
+        let start = Instant::now();
         let mut run = self.store.create_run(
             &self.config.run_name,
             self.config.to_json(),
             self.config.tags.clone(),
         )?;
-        let report = match self.train_inner(model, dataset, &mut run) {
+        match self.train_inner(model, dataset, &mut run) {
             Ok(report) => {
                 run.mark_completed()?;
-                report
+                run.write_summary(Some(start.elapsed()))?;
+                Ok(report)
             }
             Err(err) => {
                 run.mark_failed(err.to_string())?;
-                return Err(err);
+                if let Err(summary_err) = run.write_summary(Some(start.elapsed())) {
+                    warn!("failed to write run summary: {summary_err}");
+                }
+                Err(err)
             }
-        };
-        Ok(report)
+        }
     }
 
     fn train_inner(
@@ -287,7 +303,14 @@ impl ClassificationTrainer {
         run: &mut crate::experiment::RunHandle,
     ) -> Result<ClassificationReport> {
         let telemetry = match jsonl_recorder_from_env("RUSTORCH_RUN_TELEMETRY") {
-            Ok(recorder) => recorder.map(Arc::new),
+            Ok(Some(recorder)) => Some(Arc::new(recorder)),
+            Ok(None) => match run.create_telemetry_recorder() {
+                Ok(recorder) => Some(Arc::new(recorder)),
+                Err(err) => {
+                    warn!("run telemetry disabled: {err:?}");
+                    None
+                }
+            },
             Err(err) => {
                 warn!("run telemetry disabled: {err:?}");
                 None
