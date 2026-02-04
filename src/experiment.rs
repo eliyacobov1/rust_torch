@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -105,6 +105,45 @@ pub struct RunSummary {
     pub metrics: MetricsSummary,
     pub telemetry: Option<TelemetrySummary>,
     pub layout: LayoutSummary,
+}
+
+/// Filter criteria for querying runs within an experiment store.
+#[derive(Debug, Clone, Default)]
+pub struct RunFilter {
+    pub tags: Vec<String>,
+    pub statuses: Option<Vec<RunStatus>>,
+}
+
+impl RunFilter {
+    pub fn matches(&self, metadata: &RunMetadata) -> bool {
+        if let Some(statuses) = &self.statuses {
+            if !statuses.contains(&metadata.status) {
+                return false;
+            }
+        }
+        for tag in &self.tags {
+            if !metadata.tags.iter().any(|existing| existing == tag) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Combined metadata + optional summary for reporting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunOverview {
+    pub metadata: RunMetadata,
+    pub summary: Option<RunSummary>,
+}
+
+/// Outcome details for a CSV export of run summaries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CsvExportReport {
+    pub output_path: PathBuf,
+    pub rows: usize,
+    pub bytes_written: u64,
+    pub duration_ms: f64,
 }
 
 /// Configuration for asynchronous metrics logging.
@@ -299,6 +338,75 @@ impl ExperimentStore {
         Ok(RunHandle {
             store: self.clone(),
             metadata,
+        })
+    }
+
+    /// Read a run summary by id.
+    pub fn read_summary(&self, run_id: &str) -> Result<RunSummary> {
+        let run_dir = self.root.join(run_id);
+        read_summary(&run_dir)
+    }
+
+    /// List run metadata with optional summaries for reporting.
+    pub fn list_overviews(&self, filter: &RunFilter) -> Result<Vec<RunOverview>> {
+        let runs = self.list_runs()?;
+        let mut overviews = Vec::new();
+        for metadata in runs {
+            if !filter.matches(&metadata) {
+                continue;
+            }
+            let summary = read_summary_optional(&self.root.join(&metadata.id))?;
+            overviews.push(RunOverview { metadata, summary });
+        }
+        Ok(overviews)
+    }
+
+    /// Export run summaries into a CSV file with dynamic metric/telemetry columns.
+    pub fn export_run_summaries_csv<P: AsRef<Path>>(
+        &self,
+        output: P,
+        filter: &RunFilter,
+    ) -> Result<CsvExportReport> {
+        let start = Instant::now();
+        let overviews = self.list_overviews(filter)?;
+        let mut metric_names = BTreeSet::new();
+        let mut telemetry_names = BTreeSet::new();
+        for overview in &overviews {
+            if let Some(summary) = &overview.summary {
+                metric_names.extend(summary.metrics.metrics.keys().cloned());
+                if let Some(telemetry) = &summary.telemetry {
+                    telemetry_names.extend(telemetry.events.keys().cloned());
+                }
+            }
+        }
+
+        let output_path = output.as_ref().to_path_buf();
+        let file = File::create(&output_path).map_err(|err| TorchError::Experiment {
+            op: "experiment_store.export_run_summaries_csv",
+            msg: format!(
+                "failed to create export file {}: {err}",
+                output_path.display()
+            ),
+        })?;
+        let mut writer = BufWriter::new(file);
+        let header = build_csv_header(&metric_names, &telemetry_names);
+        let mut bytes_written = write_csv_row(&mut writer, &header)?;
+
+        for overview in &overviews {
+            let row = build_csv_row(overview, &metric_names, &telemetry_names);
+            bytes_written += write_csv_row(&mut writer, &row)?;
+        }
+
+        writer.flush().map_err(|err| TorchError::Experiment {
+            op: "experiment_store.export_run_summaries_csv",
+            msg: format!("failed to flush export {}: {err}", output_path.display()),
+        })?;
+
+        Ok(CsvExportReport {
+            output_path,
+            rows: overviews.len(),
+            bytes_written: bytes_written as u64,
+            duration_ms: start.elapsed().as_secs_f64() * 1000.0,
         })
     }
 }
@@ -564,6 +672,26 @@ fn read_artifacts(path: &Path) -> Result<Vec<ArtifactRecord>> {
         op: "experiment_store.read_artifacts",
         msg: format!("failed to parse artifacts: {err}"),
     })
+}
+
+fn read_summary(run_dir: &Path) -> Result<RunSummary> {
+    let path = summary_path(run_dir);
+    let buf = fs::read_to_string(&path).map_err(|err| TorchError::Experiment {
+        op: "experiment_store.read_summary",
+        msg: format!("failed to read {}: {err}", path.display()),
+    })?;
+    serde_json::from_str(&buf).map_err(|err| TorchError::Experiment {
+        op: "experiment_store.read_summary",
+        msg: format!("failed to parse summary: {err}"),
+    })
+}
+
+fn read_summary_optional(run_dir: &Path) -> Result<Option<RunSummary>> {
+    let path = summary_path(run_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    read_summary(run_dir).map(Some)
 }
 
 fn summarize_metrics(path: &Path) -> Result<MetricsSummary> {
@@ -921,4 +1049,188 @@ fn record_logger_error(error: &Arc<Mutex<Option<TorchError>>>, err: TorchError) 
         }
     }
     warn!("metrics logger error: {err:?}");
+}
+
+fn build_csv_header(
+    metric_names: &BTreeSet<String>,
+    telemetry_names: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut header = vec![
+        "run_id".to_string(),
+        "name".to_string(),
+        "status".to_string(),
+        "tags".to_string(),
+        "created_at_unix".to_string(),
+        "completed_at_unix".to_string(),
+        "duration_secs".to_string(),
+        "metrics_total_records".to_string(),
+        "metrics_first_step".to_string(),
+        "metrics_last_step".to_string(),
+        "metrics_first_timestamp_unix".to_string(),
+        "metrics_last_timestamp_unix".to_string(),
+        "layout_validations".to_string(),
+        "layout_failures".to_string(),
+        "layout_overlap_failures".to_string(),
+        "telemetry_total_events".to_string(),
+    ];
+    for name in metric_names {
+        header.extend(metric_stat_headers(name));
+    }
+    for name in telemetry_names {
+        header.extend(telemetry_stat_headers(name));
+    }
+    header
+}
+
+fn metric_stat_headers(name: &str) -> Vec<String> {
+    vec![
+        format!("metric.{name}.count"),
+        format!("metric.{name}.min"),
+        format!("metric.{name}.max"),
+        format!("metric.{name}.mean"),
+        format!("metric.{name}.p50"),
+        format!("metric.{name}.p95"),
+        format!("metric.{name}.last"),
+    ]
+}
+
+fn telemetry_stat_headers(name: &str) -> Vec<String> {
+    vec![
+        format!("telemetry.{name}.count"),
+        format!("telemetry.{name}.mean_ms"),
+        format!("telemetry.{name}.p95_ms"),
+        format!("telemetry.{name}.max_ms"),
+    ]
+}
+
+fn build_csv_row(
+    overview: &RunOverview,
+    metric_names: &BTreeSet<String>,
+    telemetry_names: &BTreeSet<String>,
+) -> Vec<String> {
+    let summary = overview.summary.as_ref();
+    let metadata = &overview.metadata;
+    let tags = metadata.tags.join("|");
+    let (completed_at, duration_secs, metrics, telemetry, layout) = match summary {
+        Some(summary) => (
+            Some(summary.completed_at_unix),
+            summary.duration_secs,
+            Some(&summary.metrics),
+            summary.telemetry.as_ref(),
+            Some(&summary.layout),
+        ),
+        None => (None, None, None, None, None),
+    };
+
+    let mut row = vec![
+        metadata.id.clone(),
+        metadata.name.clone(),
+        format!("{:?}", metadata.status),
+        tags,
+        metadata.created_at_unix.to_string(),
+        completed_at
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        duration_secs
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        metrics
+            .map(|value| value.total_records.to_string())
+            .unwrap_or_default(),
+        metrics
+            .and_then(|value| value.first_step.map(|step| step.to_string()))
+            .unwrap_or_default(),
+        metrics
+            .and_then(|value| value.last_step.map(|step| step.to_string()))
+            .unwrap_or_default(),
+        metrics
+            .and_then(|value| value.first_timestamp_unix.map(|ts| ts.to_string()))
+            .unwrap_or_default(),
+        metrics
+            .and_then(|value| value.last_timestamp_unix.map(|ts| ts.to_string()))
+            .unwrap_or_default(),
+        layout
+            .map(|value| value.validations.to_string())
+            .unwrap_or_default(),
+        layout
+            .map(|value| value.failures.to_string())
+            .unwrap_or_default(),
+        layout
+            .map(|value| value.overlap_failures.to_string())
+            .unwrap_or_default(),
+        telemetry
+            .map(|value| value.total_events.to_string())
+            .unwrap_or_default(),
+    ];
+
+    for name in metric_names {
+        if let Some(metrics) = metrics {
+            if let Some(stats) = metrics.metrics.get(name) {
+                row.push(stats.count.to_string());
+                row.push(stats.min.to_string());
+                row.push(stats.max.to_string());
+                row.push(stats.mean.to_string());
+                row.push(stats.p50.to_string());
+                row.push(stats.p95.to_string());
+                row.push(stats.last.to_string());
+                continue;
+            }
+        }
+        row.extend(std::iter::repeat(String::new()).take(7));
+    }
+
+    for name in telemetry_names {
+        if let Some(telemetry) = telemetry {
+            if let Some(stats) = telemetry.events.get(name) {
+                row.push(stats.count.to_string());
+                row.push(stats.mean_duration_ms.to_string());
+                row.push(stats.p95_duration_ms.to_string());
+                row.push(stats.max_duration_ms.to_string());
+                continue;
+            }
+        }
+        row.extend(std::iter::repeat(String::new()).take(4));
+    }
+
+    row
+}
+
+fn write_csv_row(writer: &mut BufWriter<File>, row: &[String]) -> Result<usize> {
+    let mut bytes = 0usize;
+    for (idx, field) in row.iter().enumerate() {
+        if idx > 0 {
+            writer
+                .write_all(b",")
+                .map_err(|err| TorchError::Experiment {
+                    op: "experiment_store.export_run_summaries_csv",
+                    msg: format!("failed to write csv delimiter: {err}"),
+                })?;
+            bytes += 1;
+        }
+        let escaped = csv_escape(field);
+        writer
+            .write_all(escaped.as_bytes())
+            .map_err(|err| TorchError::Experiment {
+                op: "experiment_store.export_run_summaries_csv",
+                msg: format!("failed to write csv field: {err}"),
+            })?;
+        bytes += escaped.as_bytes().len();
+    }
+    writer
+        .write_all(b"\n")
+        .map_err(|err| TorchError::Experiment {
+            op: "experiment_store.export_run_summaries_csv",
+            msg: format!("failed to write csv newline: {err}"),
+        })?;
+    bytes += 1;
+    Ok(bytes)
+}
+
+fn csv_escape(value: &str) -> String {
+    let needs_quotes = value.contains(',') || value.contains('"') || value.contains('\n');
+    if !needs_quotes {
+        return value.to_string();
+    }
+    let escaped = value.replace('"', "\"\"");
+    format!("\"{escaped}\"")
 }
