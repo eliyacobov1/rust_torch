@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use log::{info, warn};
 use rand::{distributions::Alphanumeric, Rng};
@@ -11,6 +14,7 @@ use serde_json::Value;
 
 use crate::checkpoint::{save_state_dict, StateDict};
 use crate::error::{Result, TorchError};
+use crate::telemetry::{JsonlSink, TelemetryEvent, TelemetryRecorder};
 
 /// High-level status for an experiment run stored on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +42,88 @@ pub struct MetricRecord {
     pub step: usize,
     pub metrics: BTreeMap<String, f32>,
     pub timestamp_unix: u64,
+}
+
+/// Configuration for asynchronous metrics logging.
+#[derive(Debug, Clone)]
+pub struct MetricsLoggerConfig {
+    pub batch_size: usize,
+    pub flush_interval_ms: u64,
+    pub max_queue: usize,
+}
+
+impl Default for MetricsLoggerConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 32,
+            flush_interval_ms: 250,
+            max_queue: 1024,
+        }
+    }
+}
+
+enum MetricsMessage {
+    Record(MetricRecord),
+    Flush,
+    Shutdown,
+}
+
+/// Asynchronous logger for high-frequency metrics streams.
+#[derive(Debug)]
+pub struct MetricsLogger {
+    sender: SyncSender<MetricsMessage>,
+    handle: Option<JoinHandle<()>>,
+    error: Arc<Mutex<Option<TorchError>>>,
+}
+
+impl MetricsLogger {
+    pub fn log_metrics(&self, step: usize, metrics: BTreeMap<String, f32>) -> Result<()> {
+        self.check_error()?;
+        let record = MetricRecord {
+            step,
+            metrics,
+            timestamp_unix: now_unix_seconds()?,
+        };
+        self.sender
+            .try_send(MetricsMessage::Record(record))
+            .map_err(|err| TorchError::Experiment {
+                op: "metrics_logger.log_metrics",
+                msg: format!("failed to enqueue metrics: {err}"),
+            })?;
+        Ok(())
+    }
+
+    pub fn flush(&self) -> Result<()> {
+        self.check_error()?;
+        self.sender
+            .send(MetricsMessage::Flush)
+            .map_err(|err| TorchError::Experiment {
+                op: "metrics_logger.flush",
+                msg: format!("failed to signal flush: {err}"),
+            })
+    }
+
+    fn check_error(&self) -> Result<()> {
+        let error = self.error.lock().map_err(|_| TorchError::Experiment {
+            op: "metrics_logger.check_error",
+            msg: "metrics logger error lock poisoned".to_string(),
+        })?;
+        if let Some(err) = error.as_ref() {
+            return Err(err.clone());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for MetricsLogger {
+    fn drop(&mut self) {
+        let _ = self.sender.send(MetricsMessage::Shutdown);
+        if let Some(handle) = self.handle.take() {
+            if let Err(err) = handle.join() {
+                warn!("metrics logger join failed: {err:?}");
+            }
+        }
+    }
 }
 
 /// Artifact record referencing payloads saved inside a run directory.
@@ -188,6 +274,40 @@ impl RunHandle {
         Ok(())
     }
 
+    /// Start an asynchronous metrics logger that batches writes for this run.
+    pub fn start_metrics_logger(
+        &self,
+        config: MetricsLoggerConfig,
+        telemetry: Option<Arc<TelemetryRecorder<JsonlSink>>>,
+    ) -> Result<MetricsLogger> {
+        if config.batch_size == 0 || config.max_queue == 0 {
+            return Err(TorchError::Experiment {
+                op: "run_handle.start_metrics_logger",
+                msg: "batch_size and max_queue must be > 0".to_string(),
+            });
+        }
+        if config.flush_interval_ms == 0 {
+            return Err(TorchError::Experiment {
+                op: "run_handle.start_metrics_logger",
+                msg: "flush_interval_ms must be > 0".to_string(),
+            });
+        }
+        let (sender, receiver) = mpsc::sync_channel(config.max_queue);
+        let error = Arc::new(Mutex::new(None));
+        let handle = spawn_metrics_worker(
+            self.run_dir().join("metrics.jsonl"),
+            config,
+            telemetry,
+            Arc::clone(&error),
+            receiver,
+        );
+        Ok(MetricsLogger {
+            sender,
+            handle: Some(handle),
+            error,
+        })
+    }
+
     /// Record an artifact entry in the run metadata directory.
     pub fn record_artifact(&self, record: ArtifactRecord) -> Result<()> {
         let artifacts_path = self.run_dir().join("artifacts.json");
@@ -324,4 +444,125 @@ fn read_artifacts(path: &Path) -> Result<Vec<ArtifactRecord>> {
         op: "experiment_store.read_artifacts",
         msg: format!("failed to parse artifacts: {err}"),
     })
+}
+
+fn spawn_metrics_worker(
+    path: PathBuf,
+    config: MetricsLoggerConfig,
+    telemetry: Option<Arc<TelemetryRecorder<JsonlSink>>>,
+    error: Arc<Mutex<Option<TorchError>>>,
+    receiver: mpsc::Receiver<MetricsMessage>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let file = match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => file,
+            Err(err) => {
+                record_logger_error(
+                    &error,
+                    TorchError::Experiment {
+                        op: "metrics_logger.worker",
+                        msg: format!("failed to open {}: {err}", path.display()),
+                    },
+                );
+                return;
+            }
+        };
+        let mut writer = BufWriter::new(file);
+        let mut buffer = Vec::with_capacity(config.batch_size);
+        let flush_interval = Duration::from_millis(config.flush_interval_ms);
+
+        loop {
+            match receiver.recv_timeout(flush_interval) {
+                Ok(message) => match message {
+                    MetricsMessage::Record(record) => {
+                        buffer.push(record);
+                        if buffer.len() >= config.batch_size {
+                            if let Err(err) =
+                                flush_metrics(&mut writer, &mut buffer, &config, telemetry.as_ref())
+                            {
+                                record_logger_error(&error, err);
+                                break;
+                            }
+                        }
+                    }
+                    MetricsMessage::Flush => {
+                        if let Err(err) =
+                            flush_metrics(&mut writer, &mut buffer, &config, telemetry.as_ref())
+                        {
+                            record_logger_error(&error, err);
+                            break;
+                        }
+                    }
+                    MetricsMessage::Shutdown => {
+                        let _ =
+                            flush_metrics(&mut writer, &mut buffer, &config, telemetry.as_ref());
+                        break;
+                    }
+                },
+                Err(RecvTimeoutError::Timeout) => {
+                    if !buffer.is_empty() {
+                        if let Err(err) =
+                            flush_metrics(&mut writer, &mut buffer, &config, telemetry.as_ref())
+                        {
+                            record_logger_error(&error, err);
+                            break;
+                        }
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    let _ = flush_metrics(&mut writer, &mut buffer, &config, telemetry.as_ref());
+                    break;
+                }
+            }
+        }
+    })
+}
+
+fn flush_metrics(
+    writer: &mut BufWriter<File>,
+    buffer: &mut Vec<MetricRecord>,
+    config: &MetricsLoggerConfig,
+    telemetry: Option<&Arc<TelemetryRecorder<JsonlSink>>>,
+) -> Result<()> {
+    if buffer.is_empty() {
+        return Ok(());
+    }
+    let start = Instant::now();
+    let flushed = buffer.len();
+    for record in buffer.drain(..) {
+        serde_json::to_writer(&mut *writer, &record).map_err(|err| TorchError::Experiment {
+            op: "metrics_logger.flush",
+            msg: format!("failed to serialize metrics: {err}"),
+        })?;
+        writer
+            .write_all(b"\n")
+            .map_err(|err| TorchError::Experiment {
+                op: "metrics_logger.flush",
+                msg: format!("failed to write metrics: {err}"),
+            })?;
+    }
+    writer.flush().map_err(|err| TorchError::Experiment {
+        op: "metrics_logger.flush",
+        msg: format!("failed to flush metrics: {err}"),
+    })?;
+
+    if let Some(recorder) = telemetry {
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let event = TelemetryEvent::new("metrics_flush", duration_ms)
+            .with_tag("count", flushed.to_string())
+            .with_tag("batch_size", config.batch_size.to_string());
+        if let Err(err) = recorder.record(event) {
+            warn!("metrics telemetry failed: {err:?}");
+        }
+    }
+    Ok(())
+}
+
+fn record_logger_error(error: &Arc<Mutex<Option<TorchError>>>, err: TorchError) {
+    if let Ok(mut guard) = error.lock() {
+        if guard.is_none() {
+            *guard = Some(err.clone());
+        }
+    }
+    warn!("metrics logger error: {err:?}");
 }

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -7,10 +8,11 @@ use serde_json::json;
 use crate::autograd;
 use crate::data::TensorDataset;
 use crate::error::{Result, TorchError};
-use crate::experiment::ExperimentStore;
+use crate::experiment::{ExperimentStore, MetricsLoggerConfig};
 use crate::models::LinearRegression;
 use crate::ops;
 use crate::optim::{Optimizer, Sgd};
+use crate::telemetry::jsonl_recorder_from_env;
 
 /// Training configuration for regression workloads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +101,14 @@ impl Trainer {
         dataset: &TensorDataset,
         run: &mut crate::experiment::RunHandle,
     ) -> Result<TrainingReport> {
+        let telemetry = match jsonl_recorder_from_env("RUSTORCH_RUN_TELEMETRY") {
+            Ok(recorder) => recorder.map(Arc::new),
+            Err(err) => {
+                warn!("run telemetry disabled: {err:?}");
+                None
+            }
+        };
+        let metrics_logger = run.start_metrics_logger(MetricsLoggerConfig::default(), telemetry)?;
         let mut optimizer = Sgd::new(self.config.learning_rate, self.config.weight_decay)?;
         let mut best_loss = f32::MAX;
         let mut final_loss = f32::MAX;
@@ -148,7 +158,7 @@ impl Trainer {
                     metrics.insert("batch".to_string(), batch.index as f32);
                     metrics.insert("autograd_nodes".to_string(), stats.nodes as f32);
                     metrics.insert("autograd_edges".to_string(), stats.edges as f32);
-                    run.log_metrics(total_steps, metrics)?;
+                    metrics_logger.log_metrics(total_steps, metrics)?;
                 }
             }
 
@@ -174,6 +184,7 @@ impl Trainer {
         if best_loss == f32::MAX {
             warn!("Training completed without recording loss values");
         }
+        metrics_logger.flush()?;
 
         Ok(TrainingReport {
             run_id: run.metadata().id.clone(),

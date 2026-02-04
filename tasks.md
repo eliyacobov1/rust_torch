@@ -17,6 +17,19 @@
 
 ---
 
+## Project Status (Interview Readiness)
+- **Status:** Partial — core Rust/autograd infrastructure is strong, but deeper algorithmic breadth and multi-run observability remain incomplete.
+
+## Minimal Gaps Checklist (100% Readiness)
+- [ ] Expand algorithmic depth beyond linear regression (additional models/optimizers with formal complexity notes).
+- [ ] Persist experiment summaries (metrics rollups + telemetry) to enable comparative analysis.
+- [ ] Add architecture documentation detailing design patterns, concurrency model, and error boundaries.
+
+## Follow-up Tasks (Post-Implementation)
+1. **Metrics rollups + summaries**: add per-run aggregation (p50/p95 loss, throughput) and persist in `run.json`.
+2. **Experiment CLI reporting**: add `rustorch_cli` commands to list runs, filter by tags, and export CSV.
+3. **Telemetry backpressure controls**: add queue saturation metrics and optional drop policies with alerts.
+
 ## Task 1 — Tensor Layout/Stride Semantics + Error Taxonomy
 **Goal:** deterministic layout behavior and structured failure modes.
 

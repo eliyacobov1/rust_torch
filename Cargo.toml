@@ -36,6 +36,10 @@ harness = false
 name = "bench_layout_validation"
 harness = false
 
+[[bench]]
+name = "bench_metrics_logger"
+harness = false
+
 [[bin]]
 name = "rustorch_cli"
 path = "src/main.rs"

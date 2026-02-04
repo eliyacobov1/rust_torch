@@ -45,14 +45,9 @@ fn bench_layout_validation(c: &mut Criterion) {
                             .timer("bench_layout_validation")
                             .with_tag("rank", format!("{rank}"))
                     });
-                    let _ = Tensor::try_from_vec_f32_with_strides(
-                        data,
-                        &shape,
-                        &strides,
-                        None,
-                        false,
-                    )
-                    .expect("layout validation should succeed");
+                    let _ =
+                        Tensor::try_from_vec_f32_with_strides(data, &shape, &strides, None, false)
+                            .expect("layout validation should succeed");
                 },
                 BatchSize::SmallInput,
             )

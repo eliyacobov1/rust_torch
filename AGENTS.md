@@ -115,3 +115,16 @@
 - Layout telemetry is currently process-local; schedule a refactor to reset counters per run and to emit structured metrics alongside experiment logs.
 - CI benchmarks use short measurement windows for speed; schedule nightly runs with full sample sizes to harden baselines.
 - Autograd parallelism currently uses scoped threads per batch; consider a shared worker pool to reduce scheduling overhead.
+
+## Project Status (Interview Readiness)
+- **Status:** Partial — strong Rust core + autograd/telemetry foundations, but still missing deeper algorithmic breadth and production-grade observability coverage for multi-run analysis.
+
+## Minimal Gaps Checklist (100% Readiness)
+- [ ] Expand algorithmic depth beyond linear regression (e.g., additional models and optimizers with complexity notes).
+- [ ] Add end-to-end observability export (metrics + telemetry) into experiment summaries for multi-run analysis.
+- [ ] Provide architecture doc(s) showing design patterns, threading model, and error boundaries.
+
+## Follow-up Tasks (Post-Implementation)
+1. **Metrics rollups + summaries**: add per-run aggregation (p50/p95 loss, throughput) and persist in `run.json`.
+2. **Experiment CLI reporting**: add `rustorch_cli` commands to list runs, filter by tags, and export CSV.
+3. **Telemetry backpressure controls**: add queue saturation metrics and optional drop policies with alerts.
