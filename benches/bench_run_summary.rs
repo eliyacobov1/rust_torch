@@ -40,6 +40,15 @@ fn bench_run_summary(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
+    group.bench_function("read_summary_validation", |b| {
+        b.iter_batched(
+            || create_store_with_summary(),
+            |(store, run_id)| {
+                store.read_summary(&run_id).expect("read summary");
+            },
+            BatchSize::SmallInput,
+        )
+    });
     group.finish();
 }
 
@@ -75,6 +84,21 @@ fn create_store_with_runs(count: usize) -> ExperimentStore {
             .expect("summary");
     }
     store
+}
+
+fn create_store_with_summary() -> (ExperimentStore, String) {
+    let store = ExperimentStore::new(temp_root()).expect("store");
+    let mut run = store
+        .create_run("summary_read", serde_json::json!({}), Vec::new())
+        .expect("run");
+    let mut metrics = BTreeMap::new();
+    metrics.insert("loss".to_string(), 0.125);
+    run.log_metrics(1, metrics).expect("log metrics");
+    run.mark_completed().expect("mark completed");
+    run.write_summary(Some(Duration::from_millis(5)))
+        .expect("summary");
+    let run_id = run.metadata().id.clone();
+    (store, run_id)
 }
 
 fn temp_root() -> std::path::PathBuf {
