@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufRead, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -17,7 +17,7 @@ use crate::error::{Result, TorchError};
 use crate::telemetry::{JsonlSink, TelemetryEvent, TelemetryRecorder};
 
 /// High-level status for an experiment run stored on disk.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RunStatus {
     Running,
     Completed,
@@ -42,6 +42,59 @@ pub struct MetricRecord {
     pub step: usize,
     pub metrics: BTreeMap<String, f32>,
     pub timestamp_unix: u64,
+}
+
+/// Aggregate statistics for a single metric series.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricStats {
+    pub count: u64,
+    pub min: f32,
+    pub max: f32,
+    pub mean: f32,
+    pub p50: f32,
+    pub p95: f32,
+    pub last: f32,
+}
+
+/// Rollup summary for metrics recorded during a run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsSummary {
+    pub total_records: u64,
+    pub first_step: Option<usize>,
+    pub last_step: Option<usize>,
+    pub first_timestamp_unix: Option<u64>,
+    pub last_timestamp_unix: Option<u64>,
+    pub metrics: BTreeMap<String, MetricStats>,
+}
+
+/// Aggregate statistics for telemetry events of a given name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryStats {
+    pub count: u64,
+    pub mean_duration_ms: f64,
+    pub p95_duration_ms: f64,
+    pub max_duration_ms: f64,
+}
+
+/// Rollup summary for telemetry events recorded during a run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetrySummary {
+    pub total_events: u64,
+    pub events: BTreeMap<String, TelemetryStats>,
+}
+
+/// Summary persisted after training completes for comparative analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunSummary {
+    pub run_id: String,
+    pub name: String,
+    pub created_at_unix: u64,
+    pub completed_at_unix: u64,
+    pub status: RunStatus,
+    pub status_message: Option<String>,
+    pub duration_secs: Option<f64>,
+    pub metrics: MetricsSummary,
+    pub telemetry: Option<TelemetrySummary>,
 }
 
 /// Configuration for asynchronous metrics logging.
@@ -313,6 +366,17 @@ impl RunHandle {
         })
     }
 
+    /// Create a telemetry recorder that writes into this run directory.
+    pub fn create_telemetry_recorder(&self) -> Result<TelemetryRecorder<JsonlSink>> {
+        let path = self.run_dir().join("telemetry.jsonl");
+        JsonlSink::new(&path)
+            .map(TelemetryRecorder::new)
+            .map_err(|err| TorchError::Experiment {
+                op: "run_handle.create_telemetry_recorder",
+                msg: format!("failed to create telemetry sink {}: {err}", path.display()),
+            })
+    }
+
     /// Record an artifact entry in the run metadata directory.
     pub fn record_artifact(&self, record: ArtifactRecord) -> Result<()> {
         let artifacts_path = self.run_dir().join("artifacts.json");
@@ -366,6 +430,28 @@ impl RunHandle {
         Ok(())
     }
 
+    /// Persist rollup summaries for metrics and telemetry into the run directory.
+    pub fn write_summary(&self, duration: Option<Duration>) -> Result<RunSummary> {
+        let run_dir = self.run_dir();
+        let metrics_path = run_dir.join("metrics.jsonl");
+        let telemetry_path = run_dir.join("telemetry.jsonl");
+        let metrics = summarize_metrics(&metrics_path)?;
+        let telemetry = summarize_telemetry(&telemetry_path)?;
+        let summary = RunSummary {
+            run_id: self.metadata.id.clone(),
+            name: self.metadata.name.clone(),
+            created_at_unix: self.metadata.created_at_unix,
+            completed_at_unix: now_unix_seconds()?,
+            status: self.metadata.status.clone(),
+            status_message: self.metadata.status_message.clone(),
+            duration_secs: duration.map(|d| d.as_secs_f64()),
+            metrics,
+            telemetry,
+        };
+        write_summary(&run_dir, &summary)?;
+        Ok(summary)
+    }
+
     fn run_dir(&self) -> PathBuf {
         self.store.root.join(&self.metadata.id)
     }
@@ -407,6 +493,10 @@ fn metadata_path(run_dir: &Path) -> PathBuf {
     run_dir.join("run.json")
 }
 
+fn summary_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("run_summary.json")
+}
+
 fn write_metadata(run_dir: &Path, metadata: &RunMetadata) -> Result<()> {
     let json = serde_json::to_string_pretty(metadata).map_err(|err| TorchError::Experiment {
         op: "experiment_store.write_metadata",
@@ -415,6 +505,18 @@ fn write_metadata(run_dir: &Path, metadata: &RunMetadata) -> Result<()> {
     fs::write(metadata_path(run_dir), json).map_err(|err| TorchError::Experiment {
         op: "experiment_store.write_metadata",
         msg: format!("failed to write metadata: {err}"),
+    })?;
+    Ok(())
+}
+
+fn write_summary(run_dir: &Path, summary: &RunSummary) -> Result<()> {
+    let json = serde_json::to_string_pretty(summary).map_err(|err| TorchError::Experiment {
+        op: "experiment_store.write_summary",
+        msg: format!("failed to serialize summary: {err}"),
+    })?;
+    fs::write(summary_path(run_dir), json).map_err(|err| TorchError::Experiment {
+        op: "experiment_store.write_summary",
+        msg: format!("failed to write summary: {err}"),
     })?;
     Ok(())
 }
@@ -449,6 +551,233 @@ fn read_artifacts(path: &Path) -> Result<Vec<ArtifactRecord>> {
         op: "experiment_store.read_artifacts",
         msg: format!("failed to parse artifacts: {err}"),
     })
+}
+
+fn summarize_metrics(path: &Path) -> Result<MetricsSummary> {
+    if !path.exists() {
+        return Ok(MetricsSummary {
+            total_records: 0,
+            first_step: None,
+            last_step: None,
+            first_timestamp_unix: None,
+            last_timestamp_unix: None,
+            metrics: BTreeMap::new(),
+        });
+    }
+    let file = File::open(path).map_err(|err| TorchError::Experiment {
+        op: "experiment_store.summarize_metrics",
+        msg: format!("failed to open {}: {err}", path.display()),
+    })?;
+    let reader = std::io::BufReader::new(file);
+    let mut total_records = 0u64;
+    let mut first_step = None;
+    let mut last_step = None;
+    let mut first_timestamp_unix = None;
+    let mut last_timestamp_unix = None;
+    let mut accumulators: BTreeMap<String, MetricAccumulator> = BTreeMap::new();
+
+    for line in reader.lines() {
+        let line = line.map_err(|err| TorchError::Experiment {
+            op: "experiment_store.summarize_metrics",
+            msg: format!("failed to read metrics line: {err}"),
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: MetricRecord =
+            serde_json::from_str(&line).map_err(|err| TorchError::Experiment {
+                op: "experiment_store.summarize_metrics",
+                msg: format!("failed to parse metrics: {err}"),
+            })?;
+        total_records += 1;
+        first_step.get_or_insert(record.step);
+        last_step = Some(record.step);
+        first_timestamp_unix.get_or_insert(record.timestamp_unix);
+        last_timestamp_unix = Some(record.timestamp_unix);
+        for (name, value) in record.metrics {
+            accumulators
+                .entry(name)
+                .or_insert_with(MetricAccumulator::default)
+                .push(value);
+        }
+    }
+
+    let metrics = accumulators
+        .into_iter()
+        .map(|(name, acc)| (name, acc.into_stats()))
+        .collect();
+
+    Ok(MetricsSummary {
+        total_records,
+        first_step,
+        last_step,
+        first_timestamp_unix,
+        last_timestamp_unix,
+        metrics,
+    })
+}
+
+fn summarize_telemetry(path: &Path) -> Result<Option<TelemetrySummary>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|err| TorchError::Experiment {
+        op: "experiment_store.summarize_telemetry",
+        msg: format!("failed to open {}: {err}", path.display()),
+    })?;
+    let reader = std::io::BufReader::new(file);
+    let mut total_events = 0u64;
+    let mut accumulators: BTreeMap<String, TelemetryAccumulator> = BTreeMap::new();
+    for line in reader.lines() {
+        let line = line.map_err(|err| TorchError::Experiment {
+            op: "experiment_store.summarize_telemetry",
+            msg: format!("failed to read telemetry line: {err}"),
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: TelemetryEvent =
+            serde_json::from_str(&line).map_err(|err| TorchError::Experiment {
+                op: "experiment_store.summarize_telemetry",
+                msg: format!("failed to parse telemetry: {err}"),
+            })?;
+        total_events += 1;
+        accumulators
+            .entry(event.name)
+            .or_insert_with(TelemetryAccumulator::default)
+            .push(event.duration_ms);
+    }
+    let events = accumulators
+        .into_iter()
+        .map(|(name, acc)| (name, acc.into_stats()))
+        .collect();
+    Ok(Some(TelemetrySummary {
+        total_events,
+        events,
+    }))
+}
+
+#[derive(Default)]
+struct MetricAccumulator {
+    values: Vec<f32>,
+    sum: f64,
+    min: f32,
+    max: f32,
+    last: f32,
+    initialized: bool,
+}
+
+impl MetricAccumulator {
+    fn push(&mut self, value: f32) {
+        self.values.push(value);
+        self.sum += value as f64;
+        if !self.initialized {
+            self.min = value;
+            self.max = value;
+            self.last = value;
+            self.initialized = true;
+            return;
+        }
+        if value < self.min {
+            self.min = value;
+        }
+        if value > self.max {
+            self.max = value;
+        }
+        self.last = value;
+    }
+
+    fn into_stats(mut self) -> MetricStats {
+        let count = self.values.len() as u64;
+        if count == 0 {
+            return MetricStats {
+                count: 0,
+                min: 0.0,
+                max: 0.0,
+                mean: 0.0,
+                p50: 0.0,
+                p95: 0.0,
+                last: 0.0,
+            };
+        }
+        self.values
+            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mean = (self.sum / count as f64) as f32;
+        let p50 = percentile(&self.values, 0.50);
+        let p95 = percentile(&self.values, 0.95);
+        MetricStats {
+            count,
+            min: self.min,
+            max: self.max,
+            mean,
+            p50,
+            p95,
+            last: self.last,
+        }
+    }
+}
+
+#[derive(Default)]
+struct TelemetryAccumulator {
+    values: Vec<f64>,
+    sum: f64,
+    max: f64,
+    initialized: bool,
+}
+
+impl TelemetryAccumulator {
+    fn push(&mut self, value: f64) {
+        self.values.push(value);
+        self.sum += value;
+        if !self.initialized {
+            self.max = value;
+            self.initialized = true;
+            return;
+        }
+        if value > self.max {
+            self.max = value;
+        }
+    }
+
+    fn into_stats(mut self) -> TelemetryStats {
+        let count = self.values.len() as u64;
+        if count == 0 {
+            return TelemetryStats {
+                count: 0,
+                mean_duration_ms: 0.0,
+                p95_duration_ms: 0.0,
+                max_duration_ms: 0.0,
+            };
+        }
+        self.values
+            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mean_duration_ms = self.sum / count as f64;
+        let p95_duration_ms = percentile_f64(&self.values, 0.95);
+        TelemetryStats {
+            count,
+            mean_duration_ms,
+            p95_duration_ms,
+            max_duration_ms: self.max,
+        }
+    }
+}
+
+fn percentile(values: &[f32], percentile: f64) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let clamped = percentile.clamp(0.0, 1.0);
+    let idx = ((values.len() - 1) as f64 * clamped).round() as usize;
+    values[idx]
+}
+
+fn percentile_f64(values: &[f64], percentile: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let clamped = percentile.clamp(0.0, 1.0);
+    let idx = ((values.len() - 1) as f64 * clamped).round() as usize;
+    values[idx]
 }
 
 fn spawn_metrics_worker(

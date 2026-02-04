@@ -18,16 +18,16 @@
 ---
 
 ## Project Status (Interview Readiness)
-- **Status:** Partial — core Rust/autograd infrastructure is strong, and classification coverage has been added, but multi-run observability and architecture documentation remain incomplete.
+- **Status:** Partial — core Rust/autograd infrastructure is strong, and run summaries now persist metric/telemetry rollups, but architecture documentation remains incomplete.
 
 ## Minimal Gaps Checklist (100% Readiness)
 - [x] Expand algorithmic depth beyond linear regression (additional models/optimizers with formal complexity notes).
-- [ ] Persist experiment summaries (metrics rollups + telemetry) to enable comparative analysis.
+- [x] Persist experiment summaries (metrics rollups + telemetry) to enable comparative analysis.
 - [ ] Add architecture documentation detailing design patterns, concurrency model, and error boundaries.
 
 ## Follow-up Tasks (Post-Implementation)
-1. **Metrics rollups + summaries**: add per-run aggregation (p50/p95 loss, throughput) and persist in `run.json`.
-2. **Experiment CLI reporting**: add `rustorch_cli` commands to list runs, filter by tags, and export CSV.
+1. **Experiment CLI reporting**: add `rustorch_cli` commands to list runs, filter by tags, and export CSV summaries.
+2. **Streaming quantiles**: replace in-memory percentile calculations with streaming GK/TDigest for large runs.
 3. **Telemetry backpressure controls**: add queue saturation metrics and optional drop policies with alerts.
 4. **Classifier evaluation suite**: add validation metrics (accuracy/F1) and confusion matrix artifacts.
 5. **Optimizer diversity**: add AdamW + momentum and document complexity tradeoffs.
