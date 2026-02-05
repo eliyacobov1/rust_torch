@@ -19,6 +19,13 @@ use crate::error::{Result, TorchError};
 use crate::telemetry::{JsonlSink, TelemetryEvent, TelemetryRecorder};
 use crate::tensor::{layout_stats, reset_layout_stats};
 
+const MIN_RUN_SCHEMA_VERSION: u32 = 1;
+const CURRENT_RUN_SCHEMA_VERSION: u32 = 2;
+
+fn default_schema_version() -> u32 {
+    MIN_RUN_SCHEMA_VERSION
+}
+
 /// High-level status for an experiment run stored on disk.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RunStatus {
@@ -37,6 +44,8 @@ pub struct RunMetadata {
     pub status_message: Option<String>,
     pub config: Value,
     pub tags: Vec<String>,
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
 }
 
 /// Metric payload appended as JSONL per training step.
@@ -107,6 +116,8 @@ pub struct RunSummary {
     pub metrics: MetricsSummary,
     pub telemetry: Option<TelemetrySummary>,
     pub layout: LayoutSummary,
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
 }
 
 /// Metric aggregation to compare summaries across runs.
@@ -276,6 +287,101 @@ pub struct CsvExportReport {
     pub validation_ms: f64,
 }
 
+/// Validation severity for run governance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RunValidationLevel {
+    Error,
+    Warning,
+}
+
+/// Classification for run governance findings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RunValidationCategory {
+    Metadata,
+    Summary,
+    Metrics,
+    Telemetry,
+    Artifacts,
+    Schema,
+    OrphanedFiles,
+}
+
+/// Finding emitted during run governance validation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunValidationFinding {
+    pub level: RunValidationLevel,
+    pub category: RunValidationCategory,
+    pub message: String,
+}
+
+/// Per-run validation outcome from governance checks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RunValidationStatus {
+    Valid,
+    Invalid,
+}
+
+/// Validation result for a single run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunValidationResult {
+    pub run_id: String,
+    pub status: RunValidationStatus,
+    pub findings: Vec<RunValidationFinding>,
+    pub duration_ms: f64,
+    pub checked_at_unix: u64,
+    pub schema_version: Option<u32>,
+    pub quarantined: bool,
+    pub quarantine_path: Option<PathBuf>,
+}
+
+/// Aggregate summary for governance validation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunGovernanceSummary {
+    pub total_runs: usize,
+    pub valid_runs: usize,
+    pub invalid_runs: usize,
+    pub quarantined_runs: usize,
+    pub warning_count: usize,
+}
+
+/// Governance report covering an entire experiment store.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunGovernanceReport {
+    pub store_root: PathBuf,
+    pub generated_at_unix: u64,
+    pub summary: RunGovernanceSummary,
+    pub results: Vec<RunValidationResult>,
+}
+
+/// Configuration for the governance validation pipeline.
+#[derive(Debug, Clone)]
+pub struct RunGovernanceConfig {
+    pub max_workers: usize,
+    pub strict_schema: bool,
+    pub quarantine: bool,
+    pub quarantine_dir: Option<PathBuf>,
+    pub include_orphaned_files: bool,
+    pub check_metrics: bool,
+    pub check_telemetry: bool,
+}
+
+impl Default for RunGovernanceConfig {
+    fn default() -> Self {
+        let workers = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(4);
+        Self {
+            max_workers: workers,
+            strict_schema: true,
+            quarantine: false,
+            quarantine_dir: None,
+            include_orphaned_files: true,
+            check_metrics: true,
+            check_telemetry: true,
+        }
+    }
+}
+
 /// Configuration for asynchronous metrics logging.
 #[derive(Debug, Clone)]
 pub struct MetricsLoggerConfig {
@@ -421,6 +527,7 @@ impl ExperimentStore {
             status_message: None,
             config,
             tags,
+            schema_version: CURRENT_RUN_SCHEMA_VERSION,
         };
         validate_run_metadata(&metadata)?;
         write_metadata(&run_dir, &metadata)?;
@@ -555,6 +662,83 @@ impl ExperimentStore {
             duration_ms: start.elapsed().as_secs_f64() * 1000.0,
             validation_checks: overviews.len(),
             validation_ms,
+        })
+    }
+
+    /// Validate runs with governance checks and optional quarantine.
+    pub fn validate_runs(&self, config: &RunGovernanceConfig) -> Result<RunGovernanceReport> {
+        let start = Instant::now();
+        let run_dirs = list_run_dirs(&self.root)?;
+        let total_runs = run_dirs.len();
+        if total_runs == 0 {
+            return Ok(RunGovernanceReport {
+                store_root: self.root.clone(),
+                generated_at_unix: now_unix_seconds()?,
+                summary: RunGovernanceSummary {
+                    total_runs: 0,
+                    valid_runs: 0,
+                    invalid_runs: 0,
+                    quarantined_runs: 0,
+                    warning_count: 0,
+                },
+                results: Vec::new(),
+            });
+        }
+
+        let worker_count = config.max_workers.max(1).min(total_runs.max(1));
+        let graph = build_validation_graph(config)?;
+        let mut receiver = spawn_validation_workers(
+            worker_count,
+            Arc::new(graph),
+            config.clone(),
+            self.root.clone(),
+        )?;
+
+        for run_dir in run_dirs {
+            receiver.send(run_dir)?;
+        }
+        receiver.close_sender();
+        let results = receiver.collect_results()?;
+
+        let mut valid_runs = 0;
+        let mut invalid_runs = 0;
+        let mut quarantined_runs = 0;
+        let mut warning_count = 0;
+        for result in &results {
+            match result.status {
+                RunValidationStatus::Valid => valid_runs += 1,
+                RunValidationStatus::Invalid => invalid_runs += 1,
+            }
+            if result.quarantined {
+                quarantined_runs += 1;
+            }
+            warning_count += result
+                .findings
+                .iter()
+                .filter(|finding| finding.level == RunValidationLevel::Warning)
+                .count();
+        }
+
+        info!(
+            "Governance validation completed: total={}, valid={}, invalid={}, quarantined={}, duration_ms={:.2}",
+            total_runs,
+            valid_runs,
+            invalid_runs,
+            quarantined_runs,
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+
+        Ok(RunGovernanceReport {
+            store_root: self.root.clone(),
+            generated_at_unix: now_unix_seconds()?,
+            summary: RunGovernanceSummary {
+                total_runs,
+                valid_runs,
+                invalid_runs,
+                quarantined_runs,
+                warning_count,
+            },
+            results,
         })
     }
 
@@ -825,6 +1009,7 @@ impl RunHandle {
             metrics,
             telemetry,
             layout,
+            schema_version: self.metadata.schema_version,
         };
         write_summary(&run_dir, &summary)?;
         Ok(summary)
@@ -832,6 +1017,124 @@ impl RunHandle {
 
     fn run_dir(&self) -> PathBuf {
         self.store.root.join(&self.metadata.id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum ValidationStage {
+    Metadata,
+    Summary,
+    Artifacts,
+    Metrics,
+    Telemetry,
+    OrphanedFiles,
+}
+
+#[derive(Debug, Clone)]
+struct ValidationGraph {
+    nodes: BTreeSet<ValidationStage>,
+    edges: BTreeMap<ValidationStage, BTreeSet<ValidationStage>>,
+    order: Vec<ValidationStage>,
+}
+
+impl ValidationGraph {
+    fn new() -> Self {
+        Self {
+            nodes: BTreeSet::new(),
+            edges: BTreeMap::new(),
+            order: Vec::new(),
+        }
+    }
+
+    fn add_node(&mut self, node: ValidationStage) {
+        self.nodes.insert(node);
+        self.edges.entry(node).or_default();
+    }
+
+    fn add_edge(&mut self, from: ValidationStage, to: ValidationStage) {
+        self.edges.entry(from).or_default().insert(to);
+        self.nodes.insert(from);
+        self.nodes.insert(to);
+    }
+
+    fn finalize_order(&mut self) -> Result<()> {
+        let mut incoming = BTreeMap::new();
+        for node in &self.nodes {
+            incoming.insert(*node, 0usize);
+        }
+        for (_node, deps) in &self.edges {
+            for dep in deps {
+                if let Some(count) = incoming.get_mut(dep) {
+                    *count += 1;
+                }
+            }
+        }
+        let mut ready = incoming
+            .iter()
+            .filter(|(_, count)| **count == 0)
+            .map(|(node, _)| *node)
+            .collect::<BTreeSet<ValidationStage>>();
+        let mut order = Vec::with_capacity(self.nodes.len());
+        while let Some(node) = ready.iter().next().cloned() {
+            ready.remove(&node);
+            order.push(node);
+            if let Some(deps) = self.edges.get(&node) {
+                for dep in deps {
+                    if let Some(count) = incoming.get_mut(dep) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            ready.insert(*dep);
+                        }
+                    }
+                }
+            }
+        }
+        if order.len() != self.nodes.len() {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.validation_graph",
+                msg: "validation graph contains a cycle".to_string(),
+            });
+        }
+        self.order = order;
+        Ok(())
+    }
+}
+
+struct ValidationReceiver {
+    sender: Option<mpsc::Sender<PathBuf>>,
+    results: Arc<Mutex<Vec<RunValidationResult>>>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl ValidationReceiver {
+    fn send(&self, run_dir: PathBuf) -> Result<()> {
+        let sender = self.sender.as_ref().ok_or(TorchError::Experiment {
+            op: "experiment_store.validation_send",
+            msg: "validation sender already closed".to_string(),
+        })?;
+        sender.send(run_dir).map_err(|err| TorchError::Experiment {
+            op: "experiment_store.validation_send",
+            msg: format!("failed to queue run for validation: {err}"),
+        })
+    }
+
+    fn close_sender(&mut self) {
+        self.sender.take();
+    }
+
+    fn collect_results(mut self) -> Result<Vec<RunValidationResult>> {
+        self.sender.take();
+        for handle in self.handles.drain(..) {
+            if let Err(err) = handle.join() {
+                warn!("validation worker join failed: {err:?}");
+            }
+        }
+        let mut results = self.results.lock().map_err(|_| TorchError::Experiment {
+            op: "experiment_store.collect_results",
+            msg: "validation results lock poisoned".to_string(),
+        })?;
+        results.sort_by(|a, b| a.run_id.cmp(&b.run_id));
+        Ok(std::mem::take(&mut *results))
     }
 }
 
@@ -1070,6 +1373,491 @@ fn build_pairwise_edges(
     (edge_a, edge_b)
 }
 
+fn build_validation_graph(config: &RunGovernanceConfig) -> Result<ValidationGraph> {
+    let mut graph = ValidationGraph::new();
+    graph.add_node(ValidationStage::Metadata);
+    graph.add_node(ValidationStage::Summary);
+    graph.add_node(ValidationStage::Artifacts);
+    if config.check_metrics {
+        graph.add_node(ValidationStage::Metrics);
+    }
+    if config.check_telemetry {
+        graph.add_node(ValidationStage::Telemetry);
+    }
+    if config.include_orphaned_files {
+        graph.add_node(ValidationStage::OrphanedFiles);
+    }
+
+    graph.add_edge(ValidationStage::Metadata, ValidationStage::Summary);
+    graph.add_edge(ValidationStage::Metadata, ValidationStage::Artifacts);
+    if config.check_metrics {
+        graph.add_edge(ValidationStage::Metadata, ValidationStage::Metrics);
+    }
+    if config.check_telemetry {
+        graph.add_edge(ValidationStage::Metadata, ValidationStage::Telemetry);
+    }
+    if config.include_orphaned_files {
+        graph.add_edge(ValidationStage::Artifacts, ValidationStage::OrphanedFiles);
+        graph.add_edge(ValidationStage::Metadata, ValidationStage::OrphanedFiles);
+    }
+
+    graph.finalize_order()?;
+    Ok(graph)
+}
+
+fn spawn_validation_workers(
+    worker_count: usize,
+    graph: Arc<ValidationGraph>,
+    config: RunGovernanceConfig,
+    store_root: PathBuf,
+) -> Result<ValidationReceiver> {
+    let (sender, receiver) = mpsc::channel::<PathBuf>();
+    let receiver = Arc::new(Mutex::new(receiver));
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = Vec::with_capacity(worker_count);
+    for worker_id in 0..worker_count {
+        let receiver = Arc::clone(&receiver);
+        let results = Arc::clone(&results);
+        let graph = Arc::clone(&graph);
+        let config = config.clone();
+        let store_root = store_root.clone();
+        let handle = thread::Builder::new()
+            .name(format!("run-validate-{worker_id}"))
+            .spawn(move || loop {
+                let next = {
+                    let lock = receiver.lock();
+                    match lock {
+                        Ok(guard) => guard.recv(),
+                        Err(_) => {
+                            warn!("validation receiver lock poisoned");
+                            break;
+                        }
+                    }
+                };
+                let run_dir = match next {
+                    Ok(dir) => dir,
+                    Err(_) => break,
+                };
+                let result = validate_run_dir(&store_root, &run_dir, &config, &graph);
+                let mut guard = match results.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        warn!("validation results lock poisoned");
+                        break;
+                    }
+                };
+                guard.push(result);
+            })
+            .map_err(|err| TorchError::Experiment {
+                op: "experiment_store.spawn_validation_workers",
+                msg: format!("failed to spawn worker: {err}"),
+            })?;
+        handles.push(handle);
+    }
+    Ok(ValidationReceiver {
+        sender: Some(sender),
+        results,
+        handles,
+    })
+}
+
+fn validate_run_dir(
+    store_root: &Path,
+    run_dir: &Path,
+    config: &RunGovernanceConfig,
+    graph: &ValidationGraph,
+) -> RunValidationResult {
+    let start = Instant::now();
+    let run_id = run_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let mut findings = Vec::new();
+    let mut metadata: Option<RunMetadata> = None;
+    let mut summary: Option<RunSummary> = None;
+    let mut schema_version = None;
+
+    for stage in &graph.order {
+        match stage {
+            ValidationStage::Metadata => match read_metadata(run_dir) {
+                Ok(value) => {
+                    if value.schema_version < MIN_RUN_SCHEMA_VERSION
+                        || value.schema_version > CURRENT_RUN_SCHEMA_VERSION
+                    {
+                        findings.push(RunValidationFinding {
+                            level: RunValidationLevel::Error,
+                            category: RunValidationCategory::Schema,
+                            message: format!(
+                                "metadata schema version {} outside supported range {}-{}",
+                                value.schema_version,
+                                MIN_RUN_SCHEMA_VERSION,
+                                CURRENT_RUN_SCHEMA_VERSION
+                            ),
+                        });
+                    }
+                    schema_version = Some(value.schema_version);
+                    metadata = Some(value);
+                }
+                Err(err) => {
+                    findings.push(RunValidationFinding {
+                        level: RunValidationLevel::Error,
+                        category: RunValidationCategory::Metadata,
+                        message: format!("failed to read metadata: {err}"),
+                    });
+                    break;
+                }
+            },
+            ValidationStage::Summary => {
+                let Some(meta) = metadata.as_ref() else {
+                    findings.push(RunValidationFinding {
+                        level: RunValidationLevel::Error,
+                        category: RunValidationCategory::Summary,
+                        message: "summary validation skipped: metadata missing".to_string(),
+                    });
+                    continue;
+                };
+                match read_summary_optional(run_dir) {
+                    Ok(value) => {
+                        if let Some(summary_value) = &value {
+                            if summary_value.schema_version < MIN_RUN_SCHEMA_VERSION
+                                || summary_value.schema_version > CURRENT_RUN_SCHEMA_VERSION
+                            {
+                                findings.push(RunValidationFinding {
+                                    level: RunValidationLevel::Error,
+                                    category: RunValidationCategory::Schema,
+                                    message: format!(
+                                        "summary schema version {} outside supported range {}-{}",
+                                        summary_value.schema_version,
+                                        MIN_RUN_SCHEMA_VERSION,
+                                        CURRENT_RUN_SCHEMA_VERSION
+                                    ),
+                                });
+                            }
+                            if summary_value.schema_version != meta.schema_version {
+                                findings.push(RunValidationFinding {
+                                    level: RunValidationLevel::Warning,
+                                    category: RunValidationCategory::Schema,
+                                    message: format!(
+                                        "summary schema version {} does not match metadata {}",
+                                        summary_value.schema_version, meta.schema_version
+                                    ),
+                                });
+                            }
+                        }
+                        if value.is_none() && meta.status == RunStatus::Completed {
+                            let level = if config.strict_schema {
+                                RunValidationLevel::Error
+                            } else {
+                                RunValidationLevel::Warning
+                            };
+                            findings.push(RunValidationFinding {
+                                level,
+                                category: RunValidationCategory::Summary,
+                                message: "completed run missing run_summary.json".to_string(),
+                            });
+                        }
+                        summary = value;
+                    }
+                    Err(err) => {
+                        findings.push(RunValidationFinding {
+                            level: RunValidationLevel::Error,
+                            category: RunValidationCategory::Summary,
+                            message: format!("failed to read summary: {err}"),
+                        });
+                    }
+                }
+            }
+            ValidationStage::Artifacts => match validate_artifacts(run_dir) {
+                Ok(mut artifact_findings) => findings.append(&mut artifact_findings),
+                Err(err) => findings.push(RunValidationFinding {
+                    level: RunValidationLevel::Error,
+                    category: RunValidationCategory::Artifacts,
+                    message: format!("failed to read artifacts: {err}"),
+                }),
+            },
+            ValidationStage::Metrics => {
+                if config.check_metrics {
+                    if let Err(err) = validate_metrics_file(run_dir) {
+                        findings.push(RunValidationFinding {
+                            level: RunValidationLevel::Error,
+                            category: RunValidationCategory::Metrics,
+                            message: format!("metrics validation failed: {err}"),
+                        });
+                    }
+                }
+            }
+            ValidationStage::Telemetry => {
+                if config.check_telemetry {
+                    if let Err(err) = validate_telemetry_file(run_dir) {
+                        findings.push(RunValidationFinding {
+                            level: RunValidationLevel::Error,
+                            category: RunValidationCategory::Telemetry,
+                            message: format!("telemetry validation failed: {err}"),
+                        });
+                    }
+                }
+            }
+            ValidationStage::OrphanedFiles => {
+                if config.include_orphaned_files {
+                    match find_orphaned_files(run_dir) {
+                        Ok(orphaned) if !orphaned.is_empty() => {
+                            let level = if config.strict_schema {
+                                RunValidationLevel::Error
+                            } else {
+                                RunValidationLevel::Warning
+                            };
+                            findings.push(RunValidationFinding {
+                                level,
+                                category: RunValidationCategory::OrphanedFiles,
+                                message: format!("orphaned files present: {}", orphaned.join(", ")),
+                            });
+                        }
+                        Ok(_) => {}
+                        Err(err) => findings.push(RunValidationFinding {
+                            level: RunValidationLevel::Error,
+                            category: RunValidationCategory::OrphanedFiles,
+                            message: format!("failed to scan run dir: {err}"),
+                        }),
+                    }
+                }
+            }
+        }
+    }
+
+    if let (Some(meta), Some(summary)) = (metadata.as_ref(), summary.as_ref()) {
+        if meta.id != summary.run_id {
+            findings.push(RunValidationFinding {
+                level: RunValidationLevel::Error,
+                category: RunValidationCategory::Schema,
+                message: format!(
+                    "metadata id {} does not match summary {}",
+                    meta.id, summary.run_id
+                ),
+            });
+        }
+    }
+
+    let status = if findings
+        .iter()
+        .any(|finding| finding.level == RunValidationLevel::Error)
+    {
+        RunValidationStatus::Invalid
+    } else {
+        RunValidationStatus::Valid
+    };
+
+    let mut quarantine_path = None;
+    let mut quarantined = false;
+    if status == RunValidationStatus::Invalid && config.quarantine {
+        let root = config
+            .quarantine_dir
+            .clone()
+            .unwrap_or_else(|| store_root.join("quarantine"));
+        match quarantine_run(run_dir, &root) {
+            Ok(path) => {
+                quarantine_path = Some(path);
+                quarantined = true;
+            }
+            Err(err) => findings.push(RunValidationFinding {
+                level: RunValidationLevel::Error,
+                category: RunValidationCategory::Schema,
+                message: format!("failed to quarantine run: {err}"),
+            }),
+        }
+    }
+
+    RunValidationResult {
+        run_id,
+        status,
+        findings,
+        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+        checked_at_unix: now_unix_seconds().unwrap_or_default(),
+        schema_version,
+        quarantined,
+        quarantine_path,
+    }
+}
+
+fn list_run_dirs(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut runs = Vec::new();
+    for entry in fs::read_dir(root).map_err(|err| TorchError::Experiment {
+        op: "experiment_store.list_run_dirs",
+        msg: format!("failed to read root {}: {err}", root.display()),
+    })? {
+        let entry = entry.map_err(|err| TorchError::Experiment {
+            op: "experiment_store.list_run_dirs",
+            msg: format!("failed to read dir entry: {err}"),
+        })?;
+        let file_type = entry.file_type().map_err(|err| TorchError::Experiment {
+            op: "experiment_store.list_run_dirs",
+            msg: format!("failed to read dir entry type: {err}"),
+        })?;
+        if file_type.is_dir() {
+            runs.push(entry.path());
+        }
+    }
+    runs.sort();
+    Ok(runs)
+}
+
+fn quarantine_run(run_dir: &Path, quarantine_root: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(quarantine_root).map_err(|err| TorchError::Experiment {
+        op: "experiment_store.quarantine_run",
+        msg: format!(
+            "failed to create quarantine dir {}: {err}",
+            quarantine_root.display()
+        ),
+    })?;
+    let run_name = run_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("run");
+    let suffix: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(4)
+        .map(char::from)
+        .collect();
+    let target = quarantine_root.join(format!(
+        "{}-{}-{}",
+        run_name,
+        now_unix_seconds().unwrap_or_default(),
+        suffix
+    ));
+    fs::rename(run_dir, &target).map_err(|err| TorchError::Experiment {
+        op: "experiment_store.quarantine_run",
+        msg: format!(
+            "failed to move {} to quarantine {}: {err}",
+            run_dir.display(),
+            target.display()
+        ),
+    })?;
+    Ok(target)
+}
+
+fn validate_artifacts(run_dir: &Path) -> Result<Vec<RunValidationFinding>> {
+    let artifacts_path = run_dir.join("artifacts.json");
+    if !artifacts_path.exists() {
+        return Ok(Vec::new());
+    }
+    let records = read_artifacts(&artifacts_path)?;
+    let mut findings = Vec::new();
+    for record in records {
+        let artifact_path = run_dir.join(&record.path);
+        if !artifact_path.exists() {
+            findings.push(RunValidationFinding {
+                level: RunValidationLevel::Error,
+                category: RunValidationCategory::Artifacts,
+                message: format!(
+                    "artifact {} missing at {}",
+                    record.name,
+                    artifact_path.display()
+                ),
+            });
+        }
+    }
+    Ok(findings)
+}
+
+fn validate_metrics_file(run_dir: &Path) -> Result<()> {
+    let metrics_path = run_dir.join("metrics.jsonl");
+    if !metrics_path.exists() {
+        return Ok(());
+    }
+    let file = File::open(&metrics_path).map_err(|err| TorchError::Experiment {
+        op: "experiment_store.validate_metrics_file",
+        msg: format!("failed to open metrics {}: {err}", metrics_path.display()),
+    })?;
+    let reader = std::io::BufReader::new(file);
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.map_err(|err| TorchError::Experiment {
+            op: "experiment_store.validate_metrics_file",
+            msg: format!("failed to read metrics line: {err}"),
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        serde_json::from_str::<MetricRecord>(&line).map_err(|err| TorchError::Experiment {
+            op: "experiment_store.validate_metrics_file",
+            msg: format!("invalid metrics json at line {}: {err}", idx + 1),
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_telemetry_file(run_dir: &Path) -> Result<()> {
+    let telemetry_path = run_dir.join("telemetry.jsonl");
+    if !telemetry_path.exists() {
+        return Ok(());
+    }
+    let file = File::open(&telemetry_path).map_err(|err| TorchError::Experiment {
+        op: "experiment_store.validate_telemetry_file",
+        msg: format!(
+            "failed to open telemetry {}: {err}",
+            telemetry_path.display()
+        ),
+    })?;
+    let reader = std::io::BufReader::new(file);
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.map_err(|err| TorchError::Experiment {
+            op: "experiment_store.validate_telemetry_file",
+            msg: format!("failed to read telemetry line: {err}"),
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        serde_json::from_str::<TelemetryEvent>(&line).map_err(|err| TorchError::Experiment {
+            op: "experiment_store.validate_telemetry_file",
+            msg: format!("invalid telemetry json at line {}: {err}", idx + 1),
+        })?;
+    }
+    Ok(())
+}
+
+fn find_orphaned_files(run_dir: &Path) -> Result<Vec<String>> {
+    let mut allowed = BTreeSet::new();
+    allowed.insert("run.json".to_string());
+    allowed.insert("run_summary.json".to_string());
+    allowed.insert("metrics.jsonl".to_string());
+    allowed.insert("telemetry.jsonl".to_string());
+    allowed.insert("artifacts.json".to_string());
+
+    let artifacts_path = run_dir.join("artifacts.json");
+    if artifacts_path.exists() {
+        if let Ok(records) = read_artifacts(&artifacts_path) {
+            for record in records {
+                allowed.insert(record.path);
+            }
+        }
+    }
+
+    let mut orphaned = Vec::new();
+    for entry in fs::read_dir(run_dir).map_err(|err| TorchError::Experiment {
+        op: "experiment_store.find_orphaned_files",
+        msg: format!("failed to read run dir {}: {err}", run_dir.display()),
+    })? {
+        let entry = entry.map_err(|err| TorchError::Experiment {
+            op: "experiment_store.find_orphaned_files",
+            msg: format!("failed to read run dir entry: {err}"),
+        })?;
+        let file_type = entry.file_type().map_err(|err| TorchError::Experiment {
+            op: "experiment_store.find_orphaned_files",
+            msg: format!("failed to read run dir entry type: {err}"),
+        })?;
+        if !file_type.is_file() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            orphaned.push(name);
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !allowed.contains(&name) {
+            orphaned.push(name);
+        }
+    }
+    orphaned.sort();
+    Ok(orphaned)
+}
+
 fn generate_run_id(name: &str) -> Result<String> {
     let now = now_unix_seconds()?;
     let suffix: String = rand::thread_rng()
@@ -1238,6 +2026,17 @@ fn validate_run_metadata(metadata: &RunMetadata) -> Result<()> {
             msg: "metadata.tags cannot contain empty values".to_string(),
         });
     }
+    if metadata.schema_version < MIN_RUN_SCHEMA_VERSION
+        || metadata.schema_version > CURRENT_RUN_SCHEMA_VERSION
+    {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_metadata",
+            msg: format!(
+                "metadata schema version {} outside supported range {}-{}",
+                metadata.schema_version, MIN_RUN_SCHEMA_VERSION, CURRENT_RUN_SCHEMA_VERSION
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -1273,6 +2072,17 @@ fn validate_run_summary(summary: &RunSummary) -> Result<()> {
                 msg: "summary.duration_secs must be finite and non-negative".to_string(),
             });
         }
+    }
+    if summary.schema_version < MIN_RUN_SCHEMA_VERSION
+        || summary.schema_version > CURRENT_RUN_SCHEMA_VERSION
+    {
+        return Err(TorchError::Experiment {
+            op: "experiment_store.validate_summary",
+            msg: format!(
+                "summary schema version {} outside supported range {}-{}",
+                summary.schema_version, MIN_RUN_SCHEMA_VERSION, CURRENT_RUN_SCHEMA_VERSION
+            ),
+        });
     }
     validate_metrics_summary(&summary.metrics)?;
     if let Some(telemetry) = &summary.telemetry {
@@ -1442,6 +2252,15 @@ fn validate_run_overview(overview: &RunOverview) -> Result<()> {
     validate_run_metadata(&overview.metadata)?;
     if let Some(summary) = &overview.summary {
         validate_run_summary(summary)?;
+        if summary.schema_version != overview.metadata.schema_version {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.validate_overview",
+                msg: format!(
+                    "summary schema version {} does not match metadata {}",
+                    summary.schema_version, overview.metadata.schema_version
+                ),
+            });
+        }
         if summary.run_id != overview.metadata.id {
             return Err(TorchError::Experiment {
                 op: "experiment_store.validate_overview",

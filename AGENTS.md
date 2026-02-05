@@ -1,13 +1,14 @@
 # Repository Guidelines (Senior-Grade Focus)
 
 ## Architectural Pillars (Hardest-Path Emphasis)
-1. **Experiment Intelligence & Analytics** — Run comparison graph, delta indexing, validation, and reporting.
-2. **Service/API Orchestration** — High-level training workflows and reproducible config surfaces.
-3. **Algorithmic Training Suite** — Model, optimizer, dataset, and trainer pipelines with observability.
+1. **Run Governance & Validation** — Schema versioning, quarantine workflows, audit trails, and compliance-grade reports.
+2. **Experiment Intelligence & Analytics** — Graph-based comparisons, delta indexing, validation, and reporting.
+3. **Service/API Orchestration** — High-level training workflows with reproducible config surfaces and telemetry export.
+4. **Algorithmic Training Suite** — Model, optimizer, dataset, and trainer pipelines with observability.
 
 ## Project Structure & Module Organization
 - `src/` holds the Rust core (tensor, autograd, ops, storage, CLI in `main.rs`).
-- `src/experiment.rs` implements experiment persistence, telemetry summaries, and run comparison analytics.
+- `src/experiment.rs` implements experiment persistence, telemetry summaries, run comparisons, and run governance.
 - `src/checkpoint.rs` implements versioned checkpoint serialization and `state_dict` save/load.
 - `tests/` contains Rust integration tests plus Python tests.
 - `python/` hosts Python-side packaging/bindings helpers.
@@ -25,6 +26,7 @@
 - `python cpp_ext/build.py` then `python examples/eager_privateuse1_demo.py`: build + run the PrivateUse1 backend demo.
 - `cargo bench`: run benchmarks in `benches/`.
 - `python scripts/bench_run_compare.py`: run analytics benchmark (wall time + memory delta).
+- `python scripts/bench_run_validate.py`: benchmark governance validation (wall time + memory delta).
 
 ## Coding Style & Naming Conventions
 - Rust 2021 edition; use `snake_case` for modules/functions and `CamelCase` for types/traits.
@@ -36,6 +38,7 @@
 - Python coverage is minimal and focused on bindings; keep tests in `tests/test_tensor.py`.
 - Name tests descriptively and keep them grouped by operation/feature area.
 - Stress + concurrency tests are required for analytics and experiment persistence changes.
+- Governance changes must include quarantine coverage and race-condition checks.
 
 ## Commit & Pull Request Guidelines
 - Commit messages in history are short, imperative, and specific (e.g., “Implement MSE loss”).
@@ -43,15 +46,19 @@
 - Link related issues if they exist; include before/after notes for API changes.
 
 ## Senior-Grade Roadmap (Next Milestones)
-1. **Run Governance & Validation**
-   - Schema versioning for run metadata + summaries.
-   - `runs-validate` CLI with quarantine and remediation reports.
+1. **Governance Enforcement & Remediation**
+   - Auto-repair for recoverable run metadata issues.
+   - Quarantine reports with remediation guidance and audit trails.
+   - Scheduled validation jobs and drift dashboards.
 2. **Performance Telemetry Export**
    - Push layout validation + autograd telemetry into experiment store.
-   - Export into CSV/JSON with regression thresholds.
+   - Export into CSV/JSON with regression thresholds and alerting hooks.
 3. **Parallel Execution & Determinism**
    - Work-stealing scheduler and deterministic replay mode.
    - Trace export for run-level profiling.
+4. **End-to-End Training Orchestration**
+   - CLI workflows for multi-stage training and evaluation pipelines.
+   - Reproducible config bundles with artifact signing.
 
 ## Intermediate Development Task (Codex Cloud)
 - Add an intermediate milestone: set up a PyTorch NN that uses `rustorch` as the backend and performs MNIST classification with minimal loss.
