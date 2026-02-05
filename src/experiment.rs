@@ -14,6 +14,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::audit::{AuditEvent, AuditLog, AuditScope, AuditStatus};
 use crate::checkpoint::{save_state_dict, StateDict};
 use crate::error::{Result, TorchError};
 use crate::telemetry::{JsonlSink, TelemetryEvent, TelemetryRecorder};
@@ -304,6 +305,7 @@ pub enum RunValidationCategory {
     Artifacts,
     Schema,
     OrphanedFiles,
+    Audit,
 }
 
 /// Finding emitted during run governance validation.
@@ -349,6 +351,8 @@ pub struct RunGovernanceSummary {
 pub struct RunGovernanceReport {
     pub store_root: PathBuf,
     pub generated_at_unix: u64,
+    pub audit_log_path: Option<PathBuf>,
+    pub audit_merkle_root: Option<String>,
     pub summary: RunGovernanceSummary,
     pub results: Vec<RunValidationResult>,
 }
@@ -363,6 +367,8 @@ pub struct RunGovernanceConfig {
     pub include_orphaned_files: bool,
     pub check_metrics: bool,
     pub check_telemetry: bool,
+    pub audit_log: bool,
+    pub audit_log_path: Option<PathBuf>,
 }
 
 impl Default for RunGovernanceConfig {
@@ -378,6 +384,8 @@ impl Default for RunGovernanceConfig {
             include_orphaned_files: true,
             check_metrics: true,
             check_telemetry: true,
+            audit_log: false,
+            audit_log_path: None,
         }
     }
 }
@@ -668,12 +676,42 @@ impl ExperimentStore {
     /// Validate runs with governance checks and optional quarantine.
     pub fn validate_runs(&self, config: &RunGovernanceConfig) -> Result<RunGovernanceReport> {
         let start = Instant::now();
+        let audit_log = prepare_audit_log(config, &self.root)?;
+        if let Err(err) = record_audit_event(
+            &audit_log,
+            AuditEvent::new(
+                AuditScope::Store,
+                None,
+                None,
+                AuditStatus::Started,
+                "governance_validation_started",
+                0,
+            ),
+        ) {
+            warn!("failed to record audit start event: {err}");
+        }
         let run_dirs = list_run_dirs(&self.root)?;
         let total_runs = run_dirs.len();
         if total_runs == 0 {
+            if let Err(err) = record_audit_event(
+                &audit_log,
+                AuditEvent::new(
+                    AuditScope::Store,
+                    None,
+                    None,
+                    AuditStatus::Completed,
+                    "governance_validation_completed",
+                    0,
+                ),
+            ) {
+                warn!("failed to record audit completion event: {err}");
+            }
+            let (audit_log_path, audit_merkle_root) = finalize_audit_log(&audit_log)?;
             return Ok(RunGovernanceReport {
                 store_root: self.root.clone(),
                 generated_at_unix: now_unix_seconds()?,
+                audit_log_path,
+                audit_merkle_root,
                 summary: RunGovernanceSummary {
                     total_runs: 0,
                     valid_runs: 0,
@@ -692,6 +730,7 @@ impl ExperimentStore {
             Arc::new(graph),
             config.clone(),
             self.root.clone(),
+            audit_log.clone(),
         )?;
 
         for run_dir in run_dirs {
@@ -728,9 +767,26 @@ impl ExperimentStore {
             start.elapsed().as_secs_f64() * 1000.0
         );
 
+        if let Err(err) = record_audit_event(
+            &audit_log,
+            AuditEvent::new(
+                AuditScope::Store,
+                None,
+                None,
+                AuditStatus::Completed,
+                "governance_validation_completed",
+                invalid_runs,
+            ),
+        ) {
+            warn!("failed to record audit completion event: {err}");
+        }
+        let (audit_log_path, audit_merkle_root) = finalize_audit_log(&audit_log)?;
+
         Ok(RunGovernanceReport {
             store_root: self.root.clone(),
             generated_at_unix: now_unix_seconds()?,
+            audit_log_path,
+            audit_merkle_root,
             summary: RunGovernanceSummary {
                 total_runs,
                 valid_runs,
@@ -1028,6 +1084,19 @@ enum ValidationStage {
     Metrics,
     Telemetry,
     OrphanedFiles,
+}
+
+impl ValidationStage {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Metadata => "metadata",
+            Self::Summary => "summary",
+            Self::Artifacts => "artifacts",
+            Self::Metrics => "metrics",
+            Self::Telemetry => "telemetry",
+            Self::OrphanedFiles => "orphaned_files",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1410,6 +1479,7 @@ fn spawn_validation_workers(
     graph: Arc<ValidationGraph>,
     config: RunGovernanceConfig,
     store_root: PathBuf,
+    audit_log: Option<Arc<Mutex<AuditLog>>>,
 ) -> Result<ValidationReceiver> {
     let (sender, receiver) = mpsc::channel::<PathBuf>();
     let receiver = Arc::new(Mutex::new(receiver));
@@ -1421,6 +1491,7 @@ fn spawn_validation_workers(
         let graph = Arc::clone(&graph);
         let config = config.clone();
         let store_root = store_root.clone();
+        let audit_log = audit_log.clone();
         let handle = thread::Builder::new()
             .name(format!("run-validate-{worker_id}"))
             .spawn(move || loop {
@@ -1438,7 +1509,7 @@ fn spawn_validation_workers(
                     Ok(dir) => dir,
                     Err(_) => break,
                 };
-                let result = validate_run_dir(&store_root, &run_dir, &config, &graph);
+                let result = validate_run_dir(&store_root, &run_dir, &config, &graph, &audit_log);
                 let mut guard = match results.lock() {
                     Ok(guard) => guard,
                     Err(_) => {
@@ -1466,6 +1537,7 @@ fn validate_run_dir(
     run_dir: &Path,
     config: &RunGovernanceConfig,
     graph: &ValidationGraph,
+    audit_log: &Option<Arc<Mutex<AuditLog>>>,
 ) -> RunValidationResult {
     let start = Instant::now();
     let run_id = run_dir
@@ -1478,7 +1550,26 @@ fn validate_run_dir(
     let mut summary: Option<RunSummary> = None;
     let mut schema_version = None;
 
+    if let Err(err) = record_audit_event(
+        audit_log,
+        AuditEvent::new(
+            AuditScope::Run,
+            Some(run_id.clone()),
+            None,
+            AuditStatus::Started,
+            "run_validation_started",
+            0,
+        ),
+    ) {
+        findings.push(RunValidationFinding {
+            level: RunValidationLevel::Warning,
+            category: RunValidationCategory::Audit,
+            message: format!("audit log failure (run start): {err}"),
+        });
+    }
+
     for stage in &graph.order {
+        let before_len = findings.len();
         match stage {
             ValidationStage::Metadata => match read_metadata(run_dir) {
                 Ok(value) => {
@@ -1623,6 +1714,33 @@ fn validate_run_dir(
                 }
             }
         }
+
+        let stage_findings = &findings[before_len..];
+        let stage_status = if stage_findings
+            .iter()
+            .any(|finding| finding.level == RunValidationLevel::Error)
+        {
+            AuditStatus::Failed
+        } else {
+            AuditStatus::Completed
+        };
+        if let Err(err) = record_audit_event(
+            audit_log,
+            AuditEvent::new(
+                AuditScope::Run,
+                Some(run_id.clone()),
+                Some(stage.as_str().to_string()),
+                stage_status,
+                "run_validation_stage",
+                stage_findings.len(),
+            ),
+        ) {
+            findings.push(RunValidationFinding {
+                level: RunValidationLevel::Warning,
+                category: RunValidationCategory::Audit,
+                message: format!("audit log failure (stage {}): {err}", stage.as_str()),
+            });
+        }
     }
 
     if let (Some(meta), Some(summary)) = (metadata.as_ref(), summary.as_ref()) {
@@ -1667,6 +1785,47 @@ fn validate_run_dir(
         }
     }
 
+    if let Err(err) = record_audit_event(
+        audit_log,
+        AuditEvent::new(
+            AuditScope::Run,
+            Some(run_id.clone()),
+            None,
+            match status {
+                RunValidationStatus::Valid => AuditStatus::Completed,
+                RunValidationStatus::Invalid => AuditStatus::Failed,
+            },
+            "run_validation_completed",
+            findings.len(),
+        ),
+    ) {
+        findings.push(RunValidationFinding {
+            level: RunValidationLevel::Warning,
+            category: RunValidationCategory::Audit,
+            message: format!("audit log failure (run completed): {err}"),
+        });
+    }
+
+    if quarantined {
+        if let Err(err) = record_audit_event(
+            audit_log,
+            AuditEvent::new(
+                AuditScope::Run,
+                Some(run_id.clone()),
+                Some("quarantine".to_string()),
+                AuditStatus::Completed,
+                "run_quarantined",
+                0,
+            ),
+        ) {
+            findings.push(RunValidationFinding {
+                level: RunValidationLevel::Warning,
+                category: RunValidationCategory::Audit,
+                message: format!("audit log failure (quarantine): {err}"),
+            });
+        }
+    }
+
     RunValidationResult {
         run_id,
         status,
@@ -1677,6 +1836,49 @@ fn validate_run_dir(
         quarantined,
         quarantine_path,
     }
+}
+
+fn prepare_audit_log(
+    config: &RunGovernanceConfig,
+    store_root: &Path,
+) -> Result<Option<Arc<Mutex<AuditLog>>>> {
+    if !config.audit_log {
+        return Ok(None);
+    }
+    let path = config
+        .audit_log_path
+        .clone()
+        .unwrap_or_else(|| store_root.join("audit").join("run_governance_audit.jsonl"));
+    let log = AuditLog::open(path)?;
+    Ok(Some(Arc::new(Mutex::new(log))))
+}
+
+fn record_audit_event(
+    audit_log: &Option<Arc<Mutex<AuditLog>>>,
+    event: AuditEvent,
+) -> Result<Option<AuditEvent>> {
+    let Some(log) = audit_log else {
+        return Ok(None);
+    };
+    let mut guard = log.lock().map_err(|_| TorchError::Experiment {
+        op: "experiment_store.record_audit_event",
+        msg: "audit log lock poisoned".to_string(),
+    })?;
+    let recorded = guard.record(event)?;
+    Ok(Some(recorded))
+}
+
+fn finalize_audit_log(
+    audit_log: &Option<Arc<Mutex<AuditLog>>>,
+) -> Result<(Option<PathBuf>, Option<String>)> {
+    let Some(log) = audit_log else {
+        return Ok((None, None));
+    };
+    let guard = log.lock().map_err(|_| TorchError::Experiment {
+        op: "experiment_store.finalize_audit_log",
+        msg: "audit log lock poisoned".to_string(),
+    })?;
+    Ok((Some(guard.path().to_path_buf()), guard.merkle_root_hex()))
 }
 
 fn list_run_dirs(root: &Path) -> Result<Vec<PathBuf>> {
