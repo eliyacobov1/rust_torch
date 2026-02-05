@@ -20,6 +20,7 @@ use crate::audit::{
 };
 use crate::checkpoint::{save_state_dict, StateDict};
 use crate::error::{Result, TorchError};
+use crate::governance::{build_governance_schedule, GovernanceScheduleEntry};
 use crate::telemetry::{JsonlSink, TelemetryEvent, TelemetryRecorder};
 use crate::tensor::{layout_stats, reset_layout_stats};
 
@@ -357,6 +358,8 @@ pub struct RunGovernanceReport {
     pub audit_log_path: Option<PathBuf>,
     pub audit_merkle_root: Option<String>,
     pub audit_verification: Option<AuditVerificationReport>,
+    pub schedule_seed: u64,
+    pub schedule_entries: Vec<GovernanceScheduleEntry>,
     pub summary: RunGovernanceSummary,
     pub results: Vec<RunValidationResult>,
     pub remediation: RunRemediationReport,
@@ -406,6 +409,7 @@ impl RunRemediationReport {
 #[derive(Debug, Clone)]
 pub struct RunGovernanceConfig {
     pub max_workers: usize,
+    pub deterministic_seed: Option<u64>,
     pub strict_schema: bool,
     pub quarantine: bool,
     pub quarantine_dir: Option<PathBuf>,
@@ -428,6 +432,7 @@ impl Default for RunGovernanceConfig {
             .unwrap_or(4);
         Self {
             max_workers: workers,
+            deterministic_seed: None,
             strict_schema: true,
             quarantine: false,
             quarantine_dir: None,
@@ -746,7 +751,15 @@ impl ExperimentStore {
             warn!("failed to record audit start event: {err}");
         }
         let run_dirs = list_run_dirs(&self.root)?;
-        let total_runs = run_dirs.len();
+        let schedule_seed = config
+            .deterministic_seed
+            .unwrap_or_else(|| derive_schedule_seed(&run_dirs));
+        let schedule_entries = build_governance_schedule(schedule_seed, run_dirs.clone())?;
+        let scheduled_dirs = schedule_entries
+            .iter()
+            .map(|entry| entry.run_dir.clone())
+            .collect::<Vec<PathBuf>>();
+        let total_runs = scheduled_dirs.len();
         if total_runs == 0 {
             if let Err(err) = record_audit_event(
                 &audit_log,
@@ -769,6 +782,8 @@ impl ExperimentStore {
                 audit_log_path,
                 audit_merkle_root,
                 audit_verification,
+                schedule_seed,
+                schedule_entries: Vec::new(),
                 summary: RunGovernanceSummary {
                     total_runs: 0,
                     valid_runs: 0,
@@ -791,7 +806,7 @@ impl ExperimentStore {
             audit_log.clone(),
         )?;
 
-        for run_dir in run_dirs {
+        for run_dir in scheduled_dirs {
             receiver.send(run_dir)?;
         }
         receiver.close_sender();
@@ -871,6 +886,8 @@ impl ExperimentStore {
             audit_log_path,
             audit_merkle_root,
             audit_verification,
+            schedule_seed,
+            schedule_entries,
             summary: RunGovernanceSummary {
                 total_runs,
                 valid_runs,
@@ -2082,6 +2099,21 @@ fn build_remediation_report(results: &[RunValidationResult]) -> Result<RunRemedi
         quarantined,
         tickets,
     })
+}
+
+fn derive_schedule_seed(run_dirs: &[PathBuf]) -> u64 {
+    let mut ids = run_dirs
+        .iter()
+        .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+        .map(|value| value.to_string())
+        .collect::<Vec<String>>();
+    ids.sort();
+    let payload = ids.join("|");
+    let hash = blake3::hash(payload.as_bytes());
+    let bytes = hash.as_bytes();
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&bytes[0..8]);
+    u64::from_le_bytes(buf)
 }
 
 fn remediation_severity(result: &RunValidationResult) -> RemediationSeverity {

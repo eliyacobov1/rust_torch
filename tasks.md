@@ -1,33 +1,33 @@
 # Principal-Grade Systems Roadmap
 
 ## North Star
-Ship a **governance-first ML runtime** with cryptographic integrity proofs, deterministic validation, and reproducible training orchestration that can stand up to a senior/principal-level systems interview.
+Deliver a **deterministic, governance-first ML runtime** with verifiable integrity proofs, replayable orchestration, and production telemetry that survives principal-level interviews.
 
 ---
 
 ## Major Milestones (Subsystem Scale)
 
-### 1) Governance Audit Engine 2.0
-**Goal:** End-to-end, verifiable governance with remediation workflows and proof artifacts.
-- Audit log verification CLI with Merkle-root validation + proof sampling.
-- Remediation ticket pipeline with severity scoring and quarantine-aware guidance.
-- Audit ledger integrity gates wired into governance reports.
-- Deterministic, parallel validation with replayable inputs.
+### 1) Deterministic Governance Replay Engine
+**Goal:** Governance validation is replayable and provable across runs.
+- Deterministic scheduling ledger for validation ordering and replay.
+- Audit-log anchoring for validation schedules + proof sampling.
+- Replay CLI for governance validation with seed + schedule manifests.
+- Strict invariants: quarantines, remediation tickets, immutable lineage.
 
 ### 2) Experiment Intelligence Graph Platform
-**Goal:** Turn experiment summaries into a graph-native analytics engine.
+**Goal:** Graph-native analytics with regression gating.
 - Delta indexing with baseline-aware ranking and provenance stamps.
-- Cross-run comparison graph with regression gating policies.
+- Cross-run comparison graph with policy-driven gating.
 - Export-ready analytics surfaces (CSV/JSON + schema versioning).
 
-### 3) Performance Telemetry & Regression Defense
+### 3) Telemetry & Performance Regression Defense
 **Goal:** Quantitative proof of system performance and regression safety.
 - Benchmark harnesses that emit wall-time + memory delta metrics.
 - Telemetry export pipelines with threshold-based alerting.
 - Continuous baseline comparison workflow (pass/fail budgets).
 
 ### 4) Deterministic Parallel Execution & Replay
-**Goal:** Predictable concurrency for analytics/training.
+**Goal:** Predictable concurrency across governance, analytics, and training.
 - Work-stealing scheduler with deterministic replay mode.
 - Trace capture + replayable seeds for profiling and debugging.
 - Structured concurrency primitives shared across governance and training.
@@ -41,7 +41,7 @@ Ship a **governance-first ML runtime** with cryptographic integrity proofs, dete
 ---
 
 ## Risk Register (Must Resolve)
-- Lack of deterministic replay for governance and analytics.
+- Missing deterministic scheduling ledger for governance replay.
 - Limited telemetry export formats and alerting hooks.
 - Missing performance regression gates for audit verification and analytics.
 
@@ -51,6 +51,7 @@ Ship a **governance-first ML runtime** with cryptographic integrity proofs, dete
 - [x] Parallel governance validation with audit logging.
 - [x] Audit verification CLI with Merkle proof sampling.
 - [x] Remediation ticket generation with quarantine awareness.
+- [x] Deterministic scheduling ledger for governance validation.
 - [ ] Deterministic replay mode for validation + analytics.
 - [ ] Telemetry export with regression thresholds.
 - [ ] Orchestrated multi-stage training workflows.
