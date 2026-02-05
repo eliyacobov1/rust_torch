@@ -1,14 +1,15 @@
-# Repository Guidelines (Senior-Grade Focus)
+# Repository Guidelines (Principal-Grade Overhaul)
 
 ## Architectural Pillars (Hardest-Path Emphasis)
-1. **Run Governance & Validation** — Schema versioning, quarantine workflows, audit trails, and compliance-grade reports.
-2. **Experiment Intelligence & Analytics** — Graph-based comparisons, delta indexing, validation, and reporting.
+1. **Governance Audit Engine** — Schema versioning, quarantine workflows, audit ledger, and cryptographic integrity proofs.
+2. **Experiment Intelligence & Analytics** — Graph-based comparisons, delta indexing, validation, and provenance-grade reporting.
 3. **Service/API Orchestration** — High-level training workflows with reproducible config surfaces and telemetry export.
 4. **Algorithmic Training Suite** — Model, optimizer, dataset, and trainer pipelines with observability.
 
 ## Project Structure & Module Organization
 - `src/` holds the Rust core (tensor, autograd, ops, storage, CLI in `main.rs`).
 - `src/experiment.rs` implements experiment persistence, telemetry summaries, run comparisons, and run governance.
+- `src/audit.rs` implements the audit ledger, hash chaining, and Merkle rollups.
 - `src/checkpoint.rs` implements versioned checkpoint serialization and `state_dict` save/load.
 - `tests/` contains Rust integration tests plus Python tests.
 - `python/` hosts Python-side packaging/bindings helpers.
@@ -26,7 +27,7 @@
 - `python cpp_ext/build.py` then `python examples/eager_privateuse1_demo.py`: build + run the PrivateUse1 backend demo.
 - `cargo bench`: run benchmarks in `benches/`.
 - `python scripts/bench_run_compare.py`: run analytics benchmark (wall time + memory delta).
-- `python scripts/bench_run_validate.py`: benchmark governance validation (wall time + memory delta).
+- `python scripts/bench_run_validate.py`: run governance benchmark (wall time + memory delta + audit).
 
 ## Coding Style & Naming Conventions
 - Rust 2021 edition; use `snake_case` for modules/functions and `CamelCase` for types/traits.
@@ -47,8 +48,8 @@
 
 ## Senior-Grade Roadmap (Next Milestones)
 1. **Governance Enforcement & Remediation**
-   - Auto-repair for recoverable run metadata issues.
-   - Quarantine reports with remediation guidance and audit trails.
+   - Audit verification CLI with Merkle root validation.
+   - Quarantine remediation guidance and remediation tickets.
    - Scheduled validation jobs and drift dashboards.
 2. **Performance Telemetry Export**
    - Push layout validation + autograd telemetry into experiment store.

@@ -1,4 +1,5 @@
 pub mod api;
+pub mod audit;
 pub mod autograd;
 pub mod checkpoint;
 pub mod data;
@@ -15,6 +16,7 @@ pub mod training;
 #[cfg(feature = "python-bindings")]
 pub mod py;
 
+pub use audit::{AuditEvent, AuditLog, AuditScope, AuditStatus, MerkleAccumulator};
 pub use checkpoint::{load_state_dict, save_state_dict, StateDict};
 pub use data::{
     ClassificationData, ClassificationDataset, RegressionData, SyntheticClassificationConfig,

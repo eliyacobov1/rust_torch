@@ -71,7 +71,13 @@ def collect_rss_kb(pid: int) -> Optional[int]:
     return None
 
 
-def run_validation(binary: str, runs_dir: Path, workers: int) -> tuple[float, Optional[int]]:
+def run_validation(
+    binary: str,
+    runs_dir: Path,
+    workers: int,
+    audit: bool,
+    audit_log: Optional[Path],
+) -> tuple[float, Optional[int], Optional[int]]:
     command = [
         binary,
         "runs-validate",
@@ -83,9 +89,14 @@ def run_validation(binary: str, runs_dir: Path, workers: int) -> tuple[float, Op
         "--no-metrics",
         "--no-orphaned",
     ]
+    if audit:
+        command.append("--audit")
+    if audit_log is not None:
+        command.extend(["--audit-log", str(audit_log)])
     start = time.perf_counter()
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     max_rss = 0
+    start_rss = collect_rss_kb(process.pid)
     while process.poll() is None:
         rss = collect_rss_kb(process.pid)
         if rss is not None:
@@ -97,7 +108,11 @@ def run_validation(binary: str, runs_dir: Path, workers: int) -> tuple[float, Op
         raise RuntimeError(
             f"validation failed (code={process.returncode})\nstdout:\n{stdout}\nstderr:\n{stderr}"
         )
-    return duration, max_rss or None
+    max_rss = max_rss or None
+    rss_delta = None
+    if start_rss is not None and max_rss is not None:
+        rss_delta = max_rss - start_rss
+    return duration, max_rss, rss_delta
 
 
 def main() -> None:
@@ -109,6 +124,17 @@ def main() -> None:
         type=str,
         default=str(Path("target/release/rustorch_cli")),
         help="Path to rustorch_cli binary",
+    )
+    parser.add_argument(
+        "--audit",
+        action="store_true",
+        help="Enable governance audit logging during the benchmark",
+    )
+    parser.add_argument(
+        "--audit-log",
+        type=str,
+        default="bench_runs/audit/run_governance_audit.jsonl",
+        help="Override audit log path when --audit is set",
     )
     args = parser.parse_args()
 
@@ -138,13 +164,18 @@ def main() -> None:
             f"rustorch_cli not found at {args.binary}. Build with cargo build --release."
         )
 
-    duration, max_rss = run_validation(args.binary, runs_dir, args.workers)
+    audit_log = Path(args.audit_log) if args.audit else None
+    duration, max_rss, rss_delta = run_validation(
+        args.binary, runs_dir, args.workers, args.audit, audit_log
+    )
     print("Run Governance Benchmark")
     print(f"runs: {args.runs}")
     print(f"write_time_s: {write_time:.4f}")
     print(f"validate_time_s: {duration:.4f}")
     if max_rss is not None:
         print(f"max_rss_kb: {max_rss}")
+    if rss_delta is not None:
+        print(f"rss_delta_kb: {rss_delta}")
 
 
 if __name__ == "__main__":
