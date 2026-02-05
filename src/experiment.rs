@@ -14,7 +14,10 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::audit::{AuditEvent, AuditLog, AuditScope, AuditStatus};
+use crate::audit::{
+    verify_audit_log, AuditEvent, AuditLog, AuditScope, AuditStatus, AuditVerificationConfig,
+    AuditVerificationReport,
+};
 use crate::checkpoint::{save_state_dict, StateDict};
 use crate::error::{Result, TorchError};
 use crate::telemetry::{JsonlSink, TelemetryEvent, TelemetryRecorder};
@@ -353,8 +356,50 @@ pub struct RunGovernanceReport {
     pub generated_at_unix: u64,
     pub audit_log_path: Option<PathBuf>,
     pub audit_merkle_root: Option<String>,
+    pub audit_verification: Option<AuditVerificationReport>,
     pub summary: RunGovernanceSummary,
     pub results: Vec<RunValidationResult>,
+    pub remediation: RunRemediationReport,
+}
+
+/// Severity for remediation tickets.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RemediationSeverity {
+    High,
+    Medium,
+    Low,
+}
+
+/// Remediation ticket generated for an invalid or quarantined run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunRemediationTicket {
+    pub ticket_id: String,
+    pub run_id: String,
+    pub severity: RemediationSeverity,
+    pub findings: Vec<RunValidationFinding>,
+    pub recommended_actions: Vec<String>,
+    pub quarantine_path: Option<PathBuf>,
+    pub created_at_unix: u64,
+}
+
+/// Aggregate remediation report for a governance run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunRemediationReport {
+    pub total_tickets: usize,
+    pub high_severity: usize,
+    pub quarantined: usize,
+    pub tickets: Vec<RunRemediationTicket>,
+}
+
+impl RunRemediationReport {
+    fn empty() -> Self {
+        Self {
+            total_tickets: 0,
+            high_severity: 0,
+            quarantined: 0,
+            tickets: Vec::new(),
+        }
+    }
 }
 
 /// Configuration for the governance validation pipeline.
@@ -369,6 +414,11 @@ pub struct RunGovernanceConfig {
     pub check_telemetry: bool,
     pub audit_log: bool,
     pub audit_log_path: Option<PathBuf>,
+    pub audit_verify: bool,
+    pub audit_expected_root: Option<String>,
+    pub audit_include_proofs: bool,
+    pub audit_max_proofs: usize,
+    pub emit_remediation: bool,
 }
 
 impl Default for RunGovernanceConfig {
@@ -386,6 +436,11 @@ impl Default for RunGovernanceConfig {
             check_telemetry: true,
             audit_log: false,
             audit_log_path: None,
+            audit_verify: true,
+            audit_expected_root: None,
+            audit_include_proofs: false,
+            audit_max_proofs: 5,
+            emit_remediation: true,
         }
     }
 }
@@ -707,11 +762,13 @@ impl ExperimentStore {
                 warn!("failed to record audit completion event: {err}");
             }
             let (audit_log_path, audit_merkle_root) = finalize_audit_log(&audit_log)?;
+            let audit_verification = build_audit_verification(&audit_log_path, config);
             return Ok(RunGovernanceReport {
                 store_root: self.root.clone(),
                 generated_at_unix: now_unix_seconds()?,
                 audit_log_path,
                 audit_merkle_root,
+                audit_verification,
                 summary: RunGovernanceSummary {
                     total_runs: 0,
                     valid_runs: 0,
@@ -720,6 +777,7 @@ impl ExperimentStore {
                     warning_count: 0,
                 },
                 results: Vec::new(),
+                remediation: RunRemediationReport::empty(),
             });
         }
 
@@ -758,6 +816,30 @@ impl ExperimentStore {
                 .count();
         }
 
+        let remediation = if config.emit_remediation {
+            build_remediation_report(&results)?
+        } else {
+            RunRemediationReport::empty()
+        };
+
+        if config.emit_remediation {
+            for ticket in &remediation.tickets {
+                if let Err(err) = record_audit_event(
+                    &audit_log,
+                    AuditEvent::new(
+                        AuditScope::Run,
+                        Some(ticket.run_id.clone()),
+                        Some("remediation".to_string()),
+                        AuditStatus::Completed,
+                        "run_remediation_ticket_created",
+                        ticket.findings.len(),
+                    ),
+                ) {
+                    warn!("failed to record remediation audit event: {err}");
+                }
+            }
+        }
+
         info!(
             "Governance validation completed: total={}, valid={}, invalid={}, quarantined={}, duration_ms={:.2}",
             total_runs,
@@ -781,12 +863,14 @@ impl ExperimentStore {
             warn!("failed to record audit completion event: {err}");
         }
         let (audit_log_path, audit_merkle_root) = finalize_audit_log(&audit_log)?;
+        let audit_verification = build_audit_verification(&audit_log_path, config);
 
         Ok(RunGovernanceReport {
             store_root: self.root.clone(),
             generated_at_unix: now_unix_seconds()?,
             audit_log_path,
             audit_merkle_root,
+            audit_verification,
             summary: RunGovernanceSummary {
                 total_runs,
                 valid_runs,
@@ -795,6 +879,7 @@ impl ExperimentStore {
                 warning_count,
             },
             results,
+            remediation,
         })
     }
 
@@ -1881,6 +1966,28 @@ fn finalize_audit_log(
     Ok((Some(guard.path().to_path_buf()), guard.merkle_root_hex()))
 }
 
+fn build_audit_verification(
+    audit_log_path: &Option<PathBuf>,
+    config: &RunGovernanceConfig,
+) -> Option<AuditVerificationReport> {
+    if !config.audit_verify {
+        return None;
+    }
+    let Some(path) = audit_log_path else {
+        return None;
+    };
+    let mut verify_config = AuditVerificationConfig::default();
+    verify_config.include_proofs = config.audit_include_proofs;
+    verify_config.max_proofs = config.audit_max_proofs;
+    verify_config.expected_root = config.audit_expected_root.clone();
+    match verify_audit_log(path, &verify_config) {
+        Ok(report) => Some(report),
+        Err(err) => Some(AuditVerificationReport::from_error(format!(
+            "audit verification failed: {err}"
+        ))),
+    }
+}
+
 fn list_run_dirs(root: &Path) -> Result<Vec<PathBuf>> {
     let mut runs = Vec::new();
     for entry in fs::read_dir(root).map_err(|err| TorchError::Experiment {
@@ -1940,6 +2047,117 @@ fn quarantine_run(run_dir: &Path, quarantine_root: &Path) -> Result<PathBuf> {
         ),
     })?;
     Ok(target)
+}
+
+fn build_remediation_report(results: &[RunValidationResult]) -> Result<RunRemediationReport> {
+    let mut tickets = Vec::new();
+    let mut high_severity = 0;
+    let mut quarantined = 0;
+    for result in results {
+        if result.status == RunValidationStatus::Valid {
+            continue;
+        }
+        let severity = remediation_severity(result);
+        if severity == RemediationSeverity::High {
+            high_severity += 1;
+        }
+        if result.quarantined {
+            quarantined += 1;
+        }
+        let ticket_id = format!("remediate-{}-{}", result.run_id, now_unix_seconds()?);
+        let actions = remediation_actions(&result.findings, result.quarantined);
+        tickets.push(RunRemediationTicket {
+            ticket_id,
+            run_id: result.run_id.clone(),
+            severity,
+            findings: result.findings.clone(),
+            recommended_actions: actions,
+            quarantine_path: result.quarantine_path.clone(),
+            created_at_unix: now_unix_seconds()?,
+        });
+    }
+    Ok(RunRemediationReport {
+        total_tickets: tickets.len(),
+        high_severity,
+        quarantined,
+        tickets,
+    })
+}
+
+fn remediation_severity(result: &RunValidationResult) -> RemediationSeverity {
+    if result.quarantined {
+        return RemediationSeverity::High;
+    }
+    let has_error = result
+        .findings
+        .iter()
+        .any(|finding| finding.level == RunValidationLevel::Error);
+    if !has_error {
+        return RemediationSeverity::Low;
+    }
+    let critical_categories = [
+        RunValidationCategory::Schema,
+        RunValidationCategory::Audit,
+        RunValidationCategory::Artifacts,
+    ];
+    if result.findings.iter().any(|finding| {
+        finding.level == RunValidationLevel::Error
+            && critical_categories.contains(&finding.category)
+    }) {
+        RemediationSeverity::High
+    } else {
+        RemediationSeverity::Medium
+    }
+}
+
+fn remediation_actions(findings: &[RunValidationFinding], quarantined: bool) -> Vec<String> {
+    let mut actions = BTreeSet::new();
+    if quarantined {
+        actions.insert(
+            "Inspect quarantined run contents and restore to the main store after remediation."
+                .to_string(),
+        );
+    }
+    for finding in findings {
+        match finding.category {
+            RunValidationCategory::Schema => {
+                actions.insert(
+                    "Regenerate run.json and run_summary.json with a supported schema version."
+                        .to_string(),
+                );
+            }
+            RunValidationCategory::Metadata => {
+                actions.insert(
+                    "Repair run metadata: ensure status, timestamps, and tags are consistent."
+                        .to_string(),
+                );
+            }
+            RunValidationCategory::Summary => {
+                actions.insert(
+                    "Recompute run summary statistics and write run_summary.json.".to_string(),
+                );
+            }
+            RunValidationCategory::Metrics => {
+                actions.insert("Recompute metrics.jsonl with valid JSONL payloads.".to_string());
+            }
+            RunValidationCategory::Telemetry => {
+                actions.insert("Re-export telemetry.jsonl with valid JSONL payloads.".to_string());
+            }
+            RunValidationCategory::Artifacts => {
+                actions.insert(
+                    "Restore missing artifacts or update artifacts.json references.".to_string(),
+                );
+            }
+            RunValidationCategory::OrphanedFiles => {
+                actions.insert("Remove orphaned files or add them to artifacts.json.".to_string());
+            }
+            RunValidationCategory::Audit => {
+                actions
+                    .insert("Re-run governance validation with audit logging enabled.".to_string());
+            }
+        }
+    }
+    actions.into_iter().collect()
 }
 
 fn validate_artifacts(run_dir: &Path) -> Result<Vec<RunValidationFinding>> {

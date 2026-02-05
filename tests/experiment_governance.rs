@@ -78,6 +78,8 @@ fn governance_quarantines_invalid_summary() {
     assert_eq!(report.summary.total_runs, 1);
     assert_eq!(report.summary.invalid_runs, 1);
     assert_eq!(report.summary.quarantined_runs, 1);
+    assert_eq!(report.remediation.total_tickets, 1);
+    assert_eq!(report.remediation.quarantined, 1);
     let result = report.results.first().expect("result");
     assert!(result.quarantined);
     let quarantine_path = result.quarantine_path.as_ref().expect("path");
@@ -107,12 +109,15 @@ fn governance_parallel_validation_stress() {
     config.max_workers = 4;
     config.audit_log = true;
     config.audit_log_path = Some(store.root().join("audit").join("stress.jsonl"));
+    config.audit_include_proofs = true;
+    config.audit_max_proofs = 3;
     let report = store.validate_runs(&config).expect("report");
     let expected = runs_per_thread * 4;
 
     assert_eq!(report.summary.total_runs, expected);
     assert_eq!(report.summary.valid_runs, expected);
     assert_eq!(report.summary.invalid_runs, 0);
+    assert_eq!(report.remediation.total_tickets, 0);
 
     let audit_path = report.audit_log_path.expect("audit path");
     let events = read_audit_events(&audit_path);
@@ -124,6 +129,12 @@ fn governance_parallel_validation_stress() {
         merkle.append(hash);
     }
     assert_eq!(report.audit_merkle_root, merkle.root_hex());
+    let verification = report.audit_verification.expect("verification");
+    assert_eq!(
+        verification.status,
+        rustorch::audit::AuditVerificationStatus::Valid
+    );
+    assert!(!verification.proofs.is_empty());
 }
 
 #[test]
@@ -145,6 +156,7 @@ fn governance_parallel_validation_race_safe() {
             config.audit_log_path = Some(audit_path);
             let report = store.validate_runs(&config).expect("report");
             assert_eq!(report.summary.invalid_runs, 0);
+            assert_eq!(report.remediation.total_tickets, 0);
         }));
     }
 

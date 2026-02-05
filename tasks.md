@@ -1,84 +1,56 @@
-# Senior-Grade Roadmap (Principal Systems Overhaul)
+# Principal-Grade Systems Roadmap
 
-## Architectural North Star
-Deliver a production-grade ML runtime with **governance-grade validation**, **cryptographic audit trails**, **deterministic analytics**, and **performance telemetry** suitable for senior-level systems interviews and real-world operations.
-
----
-
-## Tier-1 Program Milestones (Subsystem-Scale)
-
-### 1) Governance Audit Engine (Run Validation + Audit Ledger)
-**Objective:** Upgrade governance validation into an auditable, cryptographically verifiable subsystem with multi-stage checks and quarantine workflows.
-
-**Milestones**
-- Multi-stage validation DAG with parallel execution and deterministic ordering.
-- Append-only audit ledger with hash-chained events + Merkle root rollup.
-- Quarantine remediation workflow with structured audit event emission.
-- Governance CLI extended with audit log + verification outputs.
-
-**Status:** 🚧 In progress (audit ledger + Merkle root added; verification + remediation pending).
+## North Star
+Ship a **governance-first ML runtime** with cryptographic integrity proofs, deterministic validation, and reproducible training orchestration that can stand up to a senior/principal-level systems interview.
 
 ---
 
-### 2) Experiment Intelligence & Delta Graph Analytics
-**Objective:** Convert experiment summaries into a first-class analytics graph with directional comparisons, delta indexing, and exportable provenance.
+## Major Milestones (Subsystem Scale)
 
-**Milestones**
-- Directed comparison graph (wins/losses/ties) with top-k delta extraction.
-- Delta indexing with exportable JSON/CSV and provenance stamps.
-- Regression gating hooks driven by run governance and metric thresholds.
+### 1) Governance Audit Engine 2.0
+**Goal:** End-to-end, verifiable governance with remediation workflows and proof artifacts.
+- Audit log verification CLI with Merkle-root validation + proof sampling.
+- Remediation ticket pipeline with severity scoring and quarantine-aware guidance.
+- Audit ledger integrity gates wired into governance reports.
+- Deterministic, parallel validation with replayable inputs.
 
-**Status:** ✅ Core graph + delta engine implemented; export + regression gates pending.
+### 2) Experiment Intelligence Graph Platform
+**Goal:** Turn experiment summaries into a graph-native analytics engine.
+- Delta indexing with baseline-aware ranking and provenance stamps.
+- Cross-run comparison graph with regression gating policies.
+- Export-ready analytics surfaces (CSV/JSON + schema versioning).
 
----
-
-### 3) Performance Telemetry Export + Regression Defense
-**Objective:** Deliver quantitative evidence of system performance with memory/time deltas and automated regression gates.
-
-**Milestones**
-- Benchmark harnesses for governance + analytics with memory/time deltas.
-- Telemetry export to JSON/CSV with threshold-based alerts.
-- Baseline comparison automation with failure budgets.
-
-**Status:** 🚧 Benchmark harnesses available; export + gates pending.
-
----
+### 3) Performance Telemetry & Regression Defense
+**Goal:** Quantitative proof of system performance and regression safety.
+- Benchmark harnesses that emit wall-time + memory delta metrics.
+- Telemetry export pipelines with threshold-based alerting.
+- Continuous baseline comparison workflow (pass/fail budgets).
 
 ### 4) Deterministic Parallel Execution & Replay
-**Objective:** Provide reproducible concurrency for analytics/training with trace capture and deterministic replay.
-
-**Milestones**
+**Goal:** Predictable concurrency for analytics/training.
 - Work-stealing scheduler with deterministic replay mode.
-- Trace capture for run-level profiling with replayable seeds.
-- Structured concurrency primitives for analytics + training pipelines.
-
-**Status:** ⏳ Planned.
-
----
+- Trace capture + replayable seeds for profiling and debugging.
+- Structured concurrency primitives shared across governance and training.
 
 ### 5) End-to-End Training Orchestration
-**Objective:** Ship top-level training orchestration with signed artifacts and multi-stage pipelines.
-
-**Milestones**
-- CLI orchestration for multi-stage training/eval workflows.
-- Artifact manifest signing + immutable lineage tracking.
-- Checkpoint promotion policies with governance enforcement.
-
-**Status:** ⏳ Planned.
+**Goal:** First-class training pipelines with signed artifacts.
+- Multi-stage CLI workflows for train/eval/promote.
+- Signed artifact manifests with immutable lineage tracking.
+- Checkpoint promotion policies integrated with governance enforcement.
 
 ---
 
-## Technical Risk Register
-- **Deterministic Scheduling:** no deterministic replay mode for governance or analytics.
-- **Audit Ledger Verification:** audit chain verification is not yet exposed as a CLI workflow.
-- **Telemetry Export:** cross-run telemetry export is incomplete.
+## Risk Register (Must Resolve)
+- Lack of deterministic replay for governance and analytics.
+- Limited telemetry export formats and alerting hooks.
+- Missing performance regression gates for audit verification and analytics.
 
 ---
 
-## Readiness Gate Checklist
-- [x] Governance validation with schema enforcement + quarantine.
-- [x] Audit ledger with hash-chained events + Merkle root rollup.
-- [x] Benchmark harness that reports wall time + memory delta.
+## Readiness Gates
+- [x] Parallel governance validation with audit logging.
+- [x] Audit verification CLI with Merkle proof sampling.
+- [x] Remediation ticket generation with quarantine awareness.
 - [ ] Deterministic replay mode for validation + analytics.
-- [ ] Audit verification command + remediation guidance.
 - [ ] Telemetry export with regression thresholds.
+- [ ] Orchestrated multi-stage training workflows.
