@@ -5,6 +5,7 @@ pub mod checkpoint;
 pub mod data;
 pub mod error;
 pub mod experiment;
+pub mod governance;
 pub mod models;
 pub mod ops;
 pub mod optim;
@@ -35,6 +36,10 @@ pub use experiment::{
     RunGovernanceSummary, RunHandle, RunMetadata, RunOverview, RunRemediationReport,
     RunRemediationTicket, RunStatus, RunSummary, RunValidationCategory, RunValidationFinding,
     RunValidationLevel, RunValidationResult, RunValidationStatus, TelemetryStats, TelemetrySummary,
+};
+pub use governance::{
+    build_governance_schedule, DeterministicScheduler, GovernanceSchedule,
+    GovernanceScheduleEntry,
 };
 pub use models::{LinearRegression, MlpClassifier};
 pub use optim::{Optimizer, Sgd};

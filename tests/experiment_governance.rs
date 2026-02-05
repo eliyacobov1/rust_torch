@@ -3,7 +3,7 @@ use std::thread;
 
 use rand::{distributions::Alphanumeric, Rng};
 use rustorch::audit::{AuditEvent, MerkleAccumulator};
-use rustorch::experiment::{ExperimentStore, RunGovernanceConfig};
+use rustorch::experiment::{ExperimentStore, RunGovernanceConfig, RunGovernanceReport};
 
 fn read_audit_events(path: &std::path::Path) -> Vec<AuditEvent> {
     let mut events = Vec::new();
@@ -50,6 +50,14 @@ fn create_run(store: &ExperimentStore, name: &str) {
     run.write_summary(None).expect("summary");
 }
 
+fn schedule_run_ids(report: &RunGovernanceReport) -> Vec<String> {
+    report
+        .schedule_entries
+        .iter()
+        .map(|entry| entry.run_id.clone())
+        .collect()
+}
+
 #[test]
 fn governance_quarantines_invalid_summary() {
     let root = temp_root();
@@ -82,9 +90,30 @@ fn governance_quarantines_invalid_summary() {
     assert_eq!(report.remediation.quarantined, 1);
     let result = report.results.first().expect("result");
     assert!(result.quarantined);
+    assert_eq!(report.schedule_entries.len(), 1);
     let quarantine_path = result.quarantine_path.as_ref().expect("path");
     assert!(quarantine_path.exists());
     assert!(!store.root().join(&run_id).exists());
+}
+
+#[test]
+fn governance_schedule_is_deterministic() {
+    let root = temp_root();
+    let store = ExperimentStore::new(&root).expect("store");
+    for idx in 0..6 {
+        create_run(&store, &format!("schedule-{idx}"));
+    }
+
+    let mut config = RunGovernanceConfig::default();
+    config.deterministic_seed = Some(42);
+    let report_a = store.validate_runs(&config).expect("report");
+    let report_b = store.validate_runs(&config).expect("report");
+
+    assert_eq!(report_a.schedule_seed, 42);
+    assert_eq!(report_b.schedule_seed, 42);
+    assert_eq!(report_a.schedule_entries.len(), 6);
+    assert_eq!(report_b.schedule_entries.len(), 6);
+    assert_eq!(schedule_run_ids(&report_a), schedule_run_ids(&report_b));
 }
 
 #[test]
@@ -118,6 +147,7 @@ fn governance_parallel_validation_stress() {
     assert_eq!(report.summary.valid_runs, expected);
     assert_eq!(report.summary.invalid_runs, 0);
     assert_eq!(report.remediation.total_tickets, 0);
+    assert_eq!(report.schedule_entries.len(), expected);
 
     let audit_path = report.audit_log_path.expect("audit path");
     let events = read_audit_events(&audit_path);
