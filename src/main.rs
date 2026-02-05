@@ -4,7 +4,7 @@ use rustorch::api::RustorchService;
 use rustorch::data::{SyntheticClassificationConfig, SyntheticRegressionConfig};
 use rustorch::experiment::{
     CsvExportReport, ExperimentStore, MetricAggregation, RunComparisonConfig, RunComparisonReport,
-    RunFilter, RunStatus,
+    RunFilter, RunGovernanceConfig, RunGovernanceReport, RunStatus,
 };
 use rustorch::training::{ClassificationTrainerConfig, TrainerConfig};
 use rustorch::{Result, TorchError};
@@ -30,6 +30,7 @@ fn run() -> Result<()> {
         "runs-summary" => run_runs_summary(&args[2..]),
         "runs-export-csv" => run_runs_export_csv(&args[2..]),
         "runs-compare" => run_runs_compare(&args[2..]),
+        "runs-validate" => run_runs_validate(&args[2..]),
         "--help" | "-h" => {
             print_usage();
             Ok(())
@@ -145,7 +146,7 @@ fn run_train_mlp(args: &[String]) -> Result<()> {
 
 fn print_usage() {
     println!(
-        "rustorch_cli\n\nUSAGE:\n  rustorch_cli train-linear [options]\n  rustorch_cli train-mlp [options]\n  rustorch_cli runs-list [options]\n  rustorch_cli runs-summary [options]\n  rustorch_cli runs-export-csv [options]\n  rustorch_cli runs-compare [options]\n\nOPTIONS (shared):\n  --runs-dir <path>        Directory for experiment runs (default: runs)\n  --samples <n>            Number of samples (default: 128)\n  --features <n>           Number of input features (default: 4)\n  --epochs <n>             Training epochs (default: 10)\n  --batch-size <n>         Batch size (default: 16)\n  --lr <f>                 Learning rate (default: 1e-2)\n  --weight-decay <f>       Weight decay (default: 0)\n  --seed <n>               RNG seed (default: 42)\n  --run-name <name>        Run name label\n  --log-every <n>          Log metrics every n steps (default: 10)\n  --checkpoint-every <n>   Save checkpoint every n epochs (default: 1)\n\nOPTIONS (runs-list):\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-summary):\n  --run-id <id>            Run identifier to summarize\n\nOPTIONS (runs-export-csv):\n  --output <path>          Output CSV path (default: runs_summary.csv)\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-compare):\n  --run-ids <csv>          Explicit run IDs to compare\n  --baseline-id <id>       Run ID to use as baseline (default: first in set)\n  --metric-agg <name>      Aggregation: min|max|mean|p50|p95|last (default: last)\n  --top-k <n>              Top deltas to print per run (default: 5)\n  --format <name>          Output format: table|json (default: table)\n  --no-graph               Skip pairwise comparison graph\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (train-linear):\n  --targets <n>            Number of output targets (default: 1)\n  --noise <f>              Noise stddev for synthetic data (default: 0.05)\n\nOPTIONS (train-mlp):\n  --classes <n>            Number of classes (default: 3)\n  --hidden <n>             Hidden layer size (default: 16)\n  --cluster-std <f>        Cluster stddev for synthetic data (default: 0.35)\n  -h, --help               Print this help text\n"
+        "rustorch_cli\n\nUSAGE:\n  rustorch_cli train-linear [options]\n  rustorch_cli train-mlp [options]\n  rustorch_cli runs-list [options]\n  rustorch_cli runs-summary [options]\n  rustorch_cli runs-export-csv [options]\n  rustorch_cli runs-compare [options]\n  rustorch_cli runs-validate [options]\n\nOPTIONS (shared):\n  --runs-dir <path>        Directory for experiment runs (default: runs)\n  --samples <n>            Number of samples (default: 128)\n  --features <n>           Number of input features (default: 4)\n  --epochs <n>             Training epochs (default: 10)\n  --batch-size <n>         Batch size (default: 16)\n  --lr <f>                 Learning rate (default: 1e-2)\n  --weight-decay <f>       Weight decay (default: 0)\n  --seed <n>               RNG seed (default: 42)\n  --run-name <name>        Run name label\n  --log-every <n>          Log metrics every n steps (default: 10)\n  --checkpoint-every <n>   Save checkpoint every n epochs (default: 1)\n\nOPTIONS (runs-list):\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-summary):\n  --run-id <id>            Run identifier to summarize\n\nOPTIONS (runs-export-csv):\n  --output <path>          Output CSV path (default: runs_summary.csv)\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-compare):\n  --run-ids <csv>          Explicit run IDs to compare\n  --baseline-id <id>       Run ID to use as baseline (default: first in set)\n  --metric-agg <name>      Aggregation: min|max|mean|p50|p95|last (default: last)\n  --top-k <n>              Top deltas to print per run (default: 5)\n  --format <name>          Output format: table|json (default: table)\n  --no-graph               Skip pairwise comparison graph\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-validate):\n  --workers <n>            Number of validation workers\n  --quarantine             Move invalid runs into quarantine\n  --quarantine-dir <path>  Quarantine directory override\n  --output <path>          Write JSON report to path\n  --lenient                Downgrade schema errors to warnings where possible\n  --no-orphaned            Skip orphaned file detection\n  --no-metrics             Skip metrics.jsonl validation\n  --no-telemetry           Skip telemetry.jsonl validation\n\nOPTIONS (train-linear):\n  --targets <n>            Number of output targets (default: 1)\n  --noise <f>              Noise stddev for synthetic data (default: 0.05)\n\nOPTIONS (train-mlp):\n  --classes <n>            Number of classes (default: 3)\n  --hidden <n>             Hidden layer size (default: 16)\n  --cluster-std <f>        Cluster stddev for synthetic data (default: 0.35)\n  -h, --help               Print this help text\n"
     );
 }
 
@@ -300,6 +301,51 @@ fn run_runs_export_csv(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn run_runs_validate(args: &[String]) -> Result<()> {
+    let parser = ArgParser::new(args);
+    let runs_dir = parser
+        .get("runs-dir")?
+        .unwrap_or_else(|| "runs".to_string());
+    let output = parser.get("output")?;
+    let mut config = RunGovernanceConfig::default();
+    if let Some(workers) = parser.get_usize("workers")? {
+        config.max_workers = workers;
+    }
+    if parser.has_flag("no-orphaned") {
+        config.include_orphaned_files = false;
+    }
+    if parser.has_flag("no-metrics") {
+        config.check_metrics = false;
+    }
+    if parser.has_flag("no-telemetry") {
+        config.check_telemetry = false;
+    }
+    if parser.has_flag("quarantine") {
+        config.quarantine = true;
+    }
+    if parser.has_flag("lenient") {
+        config.strict_schema = false;
+    }
+    if let Some(quarantine_dir) = parser.get("quarantine-dir")? {
+        config.quarantine_dir = Some(quarantine_dir.into());
+    }
+
+    let store = ExperimentStore::new(runs_dir)?;
+    let report = store.validate_runs(&config)?;
+    print_governance_report(&report);
+    if let Some(output_path) = output {
+        let json = serde_json::to_string_pretty(&report).map_err(|err| TorchError::Experiment {
+            op: "cli.runs_validate",
+            msg: format!("failed to serialize report: {err}"),
+        })?;
+        std::fs::write(&output_path, json).map_err(|err| TorchError::Experiment {
+            op: "cli.runs_validate",
+            msg: format!("failed to write report {}: {err}", output_path),
+        })?;
+    }
+    Ok(())
+}
+
 fn run_runs_compare(args: &[String]) -> Result<()> {
     let parser = ArgParser::new(args);
     let runs_dir = parser
@@ -378,6 +424,35 @@ fn print_export_report(report: &CsvExportReport) {
         report.validation_checks,
         report.validation_ms
     );
+}
+
+fn print_governance_report(report: &RunGovernanceReport) {
+    println!(
+        "governance report: total={}, valid={}, invalid={}, quarantined={}, warnings={}",
+        report.summary.total_runs,
+        report.summary.valid_runs,
+        report.summary.invalid_runs,
+        report.summary.quarantined_runs,
+        report.summary.warning_count
+    );
+    for result in &report.results {
+        println!(
+            "- {}: {:?} ({} findings, {:.2} ms)",
+            result.run_id,
+            result.status,
+            result.findings.len(),
+            result.duration_ms
+        );
+        for finding in &result.findings {
+            println!(
+                "  - {:?} {:?}: {}",
+                finding.level, finding.category, finding.message
+            );
+        }
+        if let Some(path) = &result.quarantine_path {
+            println!("  - quarantined to {}", path.display());
+        }
+    }
 }
 
 fn print_compare_report(report: &RunComparisonReport) {

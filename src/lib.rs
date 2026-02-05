@@ -25,8 +25,9 @@ pub use experiment::{
     ComparisonEdge, CsvExportReport, ExperimentStore, LayoutSummary, MetricAggregation,
     MetricDelta, MetricStats, MetricsLogger, MetricsLoggerConfig, MetricsSummary,
     RunComparisonConfig, RunComparisonGraph, RunComparisonReport, RunDeltaReport, RunDeltaSummary,
-    RunFilter, RunHandle, RunMetadata, RunOverview, RunStatus, RunSummary, TelemetryStats,
-    TelemetrySummary,
+    RunFilter, RunGovernanceConfig, RunGovernanceReport, RunGovernanceSummary, RunHandle,
+    RunMetadata, RunOverview, RunStatus, RunSummary, RunValidationCategory, RunValidationFinding,
+    RunValidationLevel, RunValidationResult, RunValidationStatus, TelemetryStats, TelemetrySummary,
 };
 pub use models::{LinearRegression, MlpClassifier};
 pub use optim::{Optimizer, Sgd};
