@@ -1,9 +1,10 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use blake3::Hash;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, TorchError};
@@ -95,6 +96,10 @@ impl MerkleAccumulator {
 
     pub fn root_hex(&self) -> Option<String> {
         self.root().map(|hash| hash.to_hex().to_string())
+    }
+
+    pub fn leaves(&self) -> &[Hash] {
+        &self.leaves
     }
 }
 
@@ -200,6 +205,339 @@ impl AuditLog {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    pub fn leaves(&self) -> &[Hash] {
+        self.merkle.leaves()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AuditVerificationStatus {
+    Valid,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AuditChainIssueKind {
+    ParseError,
+    IndexMismatch,
+    PrevHashMismatch,
+    HashMismatch,
+    HashDecodeFailure,
+    ExpectedRootMismatch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditChainIssue {
+    pub line: usize,
+    pub index: Option<u64>,
+    pub kind: AuditChainIssueKind,
+    pub message: String,
+    pub expected: Option<String>,
+    pub actual: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AuditProofDirection {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditProofStep {
+    pub sibling_hash: String,
+    pub direction: AuditProofDirection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditProof {
+    pub leaf_index: usize,
+    pub leaf_hash: String,
+    pub root: String,
+    pub path: Vec<AuditProofStep>,
+    pub valid: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditVerificationReport {
+    pub status: AuditVerificationStatus,
+    pub total_events: usize,
+    pub issues: Vec<AuditChainIssue>,
+    pub merkle_root: Option<String>,
+    pub expected_root: Option<String>,
+    pub matches_expected_root: Option<bool>,
+    pub proofs: Vec<AuditProof>,
+    pub duration_ms: f64,
+}
+
+impl AuditVerificationReport {
+    pub fn from_error(message: impl Into<String>) -> Self {
+        Self {
+            status: AuditVerificationStatus::Invalid,
+            total_events: 0,
+            issues: vec![AuditChainIssue {
+                line: 0,
+                index: None,
+                kind: AuditChainIssueKind::ParseError,
+                message: message.into(),
+                expected: None,
+                actual: None,
+            }],
+            merkle_root: None,
+            expected_root: None,
+            matches_expected_root: None,
+            proofs: Vec::new(),
+            duration_ms: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditVerificationConfig {
+    pub verify_hashes: bool,
+    pub verify_merkle: bool,
+    pub include_proofs: bool,
+    pub max_proofs: usize,
+    pub expected_root: Option<String>,
+}
+
+impl Default for AuditVerificationConfig {
+    fn default() -> Self {
+        Self {
+            verify_hashes: true,
+            verify_merkle: true,
+            include_proofs: false,
+            max_proofs: 5,
+            expected_root: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditLedger {
+    pub events: Vec<AuditEvent>,
+}
+
+impl AuditLedger {
+    pub fn from_path(path: &Path) -> Result<Self> {
+        let file = File::open(path).map_err(|err| TorchError::Experiment {
+            op: "audit_ledger.from_path",
+            msg: format!("failed to open audit log {}: {err}", path.display()),
+        })?;
+        let reader = BufReader::new(file);
+        let mut events = Vec::new();
+        for line in reader.lines() {
+            let line = line.map_err(|err| TorchError::Experiment {
+                op: "audit_ledger.from_path",
+                msg: format!("failed to read audit log {}: {err}", path.display()),
+            })?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event: AuditEvent =
+                serde_json::from_str(&line).map_err(|err| TorchError::Experiment {
+                    op: "audit_ledger.from_path",
+                    msg: format!("failed to parse audit event: {err}"),
+                })?;
+            events.push(event);
+        }
+        Ok(Self { events })
+    }
+}
+
+pub fn verify_audit_log(
+    path: impl AsRef<Path>,
+    config: &AuditVerificationConfig,
+) -> Result<AuditVerificationReport> {
+    let start = Instant::now();
+    let path = path.as_ref();
+    let file = File::open(path).map_err(|err| TorchError::Experiment {
+        op: "audit_verify",
+        msg: format!("failed to open audit log {}: {err}", path.display()),
+    })?;
+    let reader = BufReader::new(file);
+    let mut events = Vec::new();
+    let mut issues = Vec::new();
+
+    for (line_idx, line) in reader.lines().enumerate() {
+        let line = line.map_err(|err| TorchError::Experiment {
+            op: "audit_verify",
+            msg: format!("failed to read audit log {}: {err}", path.display()),
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<AuditEvent>(&line) {
+            Ok(event) => events.push(event),
+            Err(err) => issues.push(AuditChainIssue {
+                line: line_idx + 1,
+                index: None,
+                kind: AuditChainIssueKind::ParseError,
+                message: format!("failed to parse audit event: {err}"),
+                expected: None,
+                actual: None,
+            }),
+        }
+    }
+
+    let mut expected_index = 0_u64;
+    let mut prev_hash: Option<String> = None;
+    let mut leaf_hashes = Vec::with_capacity(events.len());
+
+    if config.verify_hashes {
+        let computed = events
+            .par_iter()
+            .map(|event| (event.index, event.hash.clone(), hash_event(event)))
+            .collect::<Vec<(u64, String, Result<Hash>)>>();
+        for (idx, stored_hash, hash_result) in computed {
+            match hash_result {
+                Ok(hash) => {
+                    let expected = hash.to_hex().to_string();
+                    if stored_hash != expected {
+                        issues.push(AuditChainIssue {
+                            line: (idx + 1) as usize,
+                            index: Some(idx),
+                            kind: AuditChainIssueKind::HashMismatch,
+                            message: "audit hash mismatch".to_string(),
+                            expected: Some(expected),
+                            actual: Some(stored_hash),
+                        });
+                    }
+                }
+                Err(err) => issues.push(AuditChainIssue {
+                    line: (idx + 1) as usize,
+                    index: Some(idx),
+                    kind: AuditChainIssueKind::HashMismatch,
+                    message: format!("failed to recompute hash: {err}"),
+                    expected: None,
+                    actual: None,
+                }),
+            }
+        }
+    }
+
+    for event in &events {
+        if event.index != expected_index {
+            issues.push(AuditChainIssue {
+                line: (event.index + 1) as usize,
+                index: Some(event.index),
+                kind: AuditChainIssueKind::IndexMismatch,
+                message: "audit index mismatch".to_string(),
+                expected: Some(expected_index.to_string()),
+                actual: Some(event.index.to_string()),
+            });
+            expected_index = event.index.saturating_add(1);
+        } else {
+            expected_index = expected_index.saturating_add(1);
+        }
+
+        if event.prev_hash != prev_hash {
+            issues.push(AuditChainIssue {
+                line: (event.index + 1) as usize,
+                index: Some(event.index),
+                kind: AuditChainIssueKind::PrevHashMismatch,
+                message: "previous hash mismatch".to_string(),
+                expected: prev_hash.clone(),
+                actual: event.prev_hash.clone(),
+            });
+        }
+        prev_hash = Some(event.hash.clone());
+
+        match Hash::from_hex(&event.hash) {
+            Ok(hash) => leaf_hashes.push(hash),
+            Err(err) => issues.push(AuditChainIssue {
+                line: (event.index + 1) as usize,
+                index: Some(event.index),
+                kind: AuditChainIssueKind::HashDecodeFailure,
+                message: format!("failed to decode hash: {err}"),
+                expected: None,
+                actual: Some(event.hash.clone()),
+            }),
+        }
+    }
+
+    let should_build_tree =
+        config.verify_merkle || config.include_proofs || config.expected_root.is_some();
+    let merkle_tree = if should_build_tree {
+        MerkleTree::from_leaves(leaf_hashes)
+    } else {
+        MerkleTree::from_leaves(Vec::new())
+    };
+    let merkle_root = if config.verify_merkle || config.expected_root.is_some() {
+        merkle_tree.root_hex()
+    } else {
+        None
+    };
+    let mut matches_expected_root = None;
+    if let Some(expected) = &config.expected_root {
+        let matches = merkle_root.as_deref() == Some(expected.as_str());
+        matches_expected_root = Some(matches);
+        if !matches {
+            issues.push(AuditChainIssue {
+                line: 0,
+                index: None,
+                kind: AuditChainIssueKind::ExpectedRootMismatch,
+                message: "merkle root mismatch".to_string(),
+                expected: Some(expected.clone()),
+                actual: merkle_root.clone(),
+            });
+        }
+    }
+
+    let proofs = if config.include_proofs {
+        merkle_tree
+            .sample_proofs(config.max_proofs)
+            .into_iter()
+            .map(|proof| {
+                let mut audit_proof = AuditProof {
+                    leaf_index: proof.leaf_index,
+                    leaf_hash: proof.leaf_hash,
+                    root: proof.root,
+                    path: proof.path,
+                    valid: false,
+                };
+                audit_proof.valid = verify_merkle_proof(&audit_proof);
+                audit_proof
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let status = if issues.is_empty() {
+        AuditVerificationStatus::Valid
+    } else {
+        AuditVerificationStatus::Invalid
+    };
+
+    Ok(AuditVerificationReport {
+        status,
+        total_events: events.len(),
+        issues,
+        merkle_root,
+        expected_root: config.expected_root.clone(),
+        matches_expected_root,
+        proofs,
+        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
+fn verify_merkle_proof(proof: &AuditProof) -> bool {
+    let mut hash = match Hash::from_hex(&proof.leaf_hash) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    for step in &proof.path {
+        let sibling = match Hash::from_hex(&step.sibling_hash) {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+        hash = match step.direction {
+            AuditProofDirection::Left => hash_pair(sibling, hash),
+            AuditProofDirection::Right => hash_pair(hash, sibling),
+        };
+    }
+    hash.to_hex().to_string() == proof.root
 }
 
 fn now_unix_seconds() -> Result<u64> {
@@ -251,4 +589,104 @@ fn hash_pair(left: Hash, right: Hash) -> Hash {
     hasher.update(left.as_bytes());
     hasher.update(right.as_bytes());
     hasher.finalize()
+}
+
+#[derive(Debug, Clone)]
+struct MerkleProofRaw {
+    leaf_index: usize,
+    leaf_hash: String,
+    root: String,
+    path: Vec<AuditProofStep>,
+}
+
+#[derive(Debug, Clone)]
+struct MerkleTree {
+    levels: Vec<Vec<Hash>>,
+}
+
+impl MerkleTree {
+    fn from_leaves(leaves: Vec<Hash>) -> Self {
+        if leaves.is_empty() {
+            return Self { levels: Vec::new() };
+        }
+        let mut levels = Vec::new();
+        let mut current = leaves;
+        levels.push(current.clone());
+        while current.len() > 1 {
+            if current.len() % 2 == 1 {
+                let last = *current.last().expect("non-empty");
+                current.push(last);
+            }
+            let mut next = Vec::with_capacity(current.len() / 2);
+            for pair in current.chunks(2) {
+                next.push(hash_pair(pair[0], pair[1]));
+            }
+            levels.push(next.clone());
+            current = next;
+        }
+        Self { levels }
+    }
+
+    fn root_hex(&self) -> Option<String> {
+        self.levels
+            .last()
+            .and_then(|level| level.first())
+            .map(|hash| hash.to_hex().to_string())
+    }
+
+    fn proof(&self, index: usize) -> Option<MerkleProofRaw> {
+        let root = self.root_hex()?;
+        let mut idx = index;
+        let leaf = self.levels.first()?.get(index)?.to_hex().to_string();
+        let mut path = Vec::new();
+        for level in &self.levels {
+            if level.len() <= 1 {
+                break;
+            }
+            let is_right = idx % 2 == 1;
+            let sibling_idx = if is_right { idx - 1 } else { idx + 1 };
+            let sibling = if sibling_idx < level.len() {
+                level[sibling_idx]
+            } else {
+                level[idx]
+            };
+            let direction = if is_right {
+                AuditProofDirection::Left
+            } else {
+                AuditProofDirection::Right
+            };
+            path.push(AuditProofStep {
+                sibling_hash: sibling.to_hex().to_string(),
+                direction,
+            });
+            idx /= 2;
+        }
+        Some(MerkleProofRaw {
+            leaf_index: index,
+            leaf_hash: leaf,
+            root,
+            path,
+        })
+    }
+
+    fn sample_proofs(&self, max_proofs: usize) -> Vec<MerkleProofRaw> {
+        let Some(level) = self.levels.first() else {
+            return Vec::new();
+        };
+        let total = level.len();
+        if total == 0 || max_proofs == 0 {
+            return Vec::new();
+        }
+        let sample_count = max_proofs.min(total);
+        let step = (total as f64 / sample_count as f64).ceil() as usize;
+        let mut proofs = Vec::new();
+        let mut idx = 0;
+        while idx < total && proofs.len() < sample_count {
+            if let Some(proof) = self.proof(idx) {
+                proofs.push(proof);
+            }
+            idx = idx.saturating_add(step.max(1));
+        }
+        proofs
+    }
 }

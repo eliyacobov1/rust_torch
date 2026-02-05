@@ -1,6 +1,7 @@
 use std::env;
 
 use rustorch::api::RustorchService;
+use rustorch::audit::{verify_audit_log, AuditVerificationConfig};
 use rustorch::data::{SyntheticClassificationConfig, SyntheticRegressionConfig};
 use rustorch::experiment::{
     CsvExportReport, ExperimentStore, MetricAggregation, RunComparisonConfig, RunComparisonReport,
@@ -31,6 +32,7 @@ fn run() -> Result<()> {
         "runs-export-csv" => run_runs_export_csv(&args[2..]),
         "runs-compare" => run_runs_compare(&args[2..]),
         "runs-validate" => run_runs_validate(&args[2..]),
+        "audit-verify" => run_audit_verify(&args[2..]),
         "--help" | "-h" => {
             print_usage();
             Ok(())
@@ -146,7 +148,7 @@ fn run_train_mlp(args: &[String]) -> Result<()> {
 
 fn print_usage() {
     println!(
-        "rustorch_cli\n\nUSAGE:\n  rustorch_cli train-linear [options]\n  rustorch_cli train-mlp [options]\n  rustorch_cli runs-list [options]\n  rustorch_cli runs-summary [options]\n  rustorch_cli runs-export-csv [options]\n  rustorch_cli runs-compare [options]\n  rustorch_cli runs-validate [options]\n\nOPTIONS (shared):\n  --runs-dir <path>        Directory for experiment runs (default: runs)\n  --samples <n>            Number of samples (default: 128)\n  --features <n>           Number of input features (default: 4)\n  --epochs <n>             Training epochs (default: 10)\n  --batch-size <n>         Batch size (default: 16)\n  --lr <f>                 Learning rate (default: 1e-2)\n  --weight-decay <f>       Weight decay (default: 0)\n  --seed <n>               RNG seed (default: 42)\n  --run-name <name>        Run name label\n  --log-every <n>          Log metrics every n steps (default: 10)\n  --checkpoint-every <n>   Save checkpoint every n epochs (default: 1)\n\nOPTIONS (runs-list):\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-summary):\n  --run-id <id>            Run identifier to summarize\n\nOPTIONS (runs-export-csv):\n  --output <path>          Output CSV path (default: runs_summary.csv)\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-compare):\n  --run-ids <csv>          Explicit run IDs to compare\n  --baseline-id <id>       Run ID to use as baseline (default: first in set)\n  --metric-agg <name>      Aggregation: min|max|mean|p50|p95|last (default: last)\n  --top-k <n>              Top deltas to print per run (default: 5)\n  --format <name>          Output format: table|json (default: table)\n  --no-graph               Skip pairwise comparison graph\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-validate):\n  --workers <n>            Number of validation workers\n  --quarantine             Move invalid runs into quarantine\n  --quarantine-dir <path>  Quarantine directory override\n  --output <path>          Write JSON report to path\n  --lenient                Downgrade schema errors to warnings where possible\n  --no-orphaned            Skip orphaned file detection\n  --no-metrics             Skip metrics.jsonl validation\n  --no-telemetry           Skip telemetry.jsonl validation\n  --audit                  Enable governance audit logging\n  --audit-log <path>       Audit log path override\n\nOPTIONS (train-linear):\n  --targets <n>            Number of output targets (default: 1)\n  --noise <f>              Noise stddev for synthetic data (default: 0.05)\n\nOPTIONS (train-mlp):\n  --classes <n>            Number of classes (default: 3)\n  --hidden <n>             Hidden layer size (default: 16)\n  --cluster-std <f>        Cluster stddev for synthetic data (default: 0.35)\n  -h, --help               Print this help text\n"
+        "rustorch_cli\n\nUSAGE:\n  rustorch_cli train-linear [options]\n  rustorch_cli train-mlp [options]\n  rustorch_cli runs-list [options]\n  rustorch_cli runs-summary [options]\n  rustorch_cli runs-export-csv [options]\n  rustorch_cli runs-compare [options]\n  rustorch_cli runs-validate [options]\n  rustorch_cli audit-verify [options]\n\nOPTIONS (shared):\n  --runs-dir <path>        Directory for experiment runs (default: runs)\n  --samples <n>            Number of samples (default: 128)\n  --features <n>           Number of input features (default: 4)\n  --epochs <n>             Training epochs (default: 10)\n  --batch-size <n>         Batch size (default: 16)\n  --lr <f>                 Learning rate (default: 1e-2)\n  --weight-decay <f>       Weight decay (default: 0)\n  --seed <n>               RNG seed (default: 42)\n  --run-name <name>        Run name label\n  --log-every <n>          Log metrics every n steps (default: 10)\n  --checkpoint-every <n>   Save checkpoint every n epochs (default: 1)\n\nOPTIONS (runs-list):\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-summary):\n  --run-id <id>            Run identifier to summarize\n\nOPTIONS (runs-export-csv):\n  --output <path>          Output CSV path (default: runs_summary.csv)\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-compare):\n  --run-ids <csv>          Explicit run IDs to compare\n  --baseline-id <id>       Run ID to use as baseline (default: first in set)\n  --metric-agg <name>      Aggregation: min|max|mean|p50|p95|last (default: last)\n  --top-k <n>              Top deltas to print per run (default: 5)\n  --format <name>          Output format: table|json (default: table)\n  --no-graph               Skip pairwise comparison graph\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-validate):\n  --workers <n>             Number of validation workers\n  --quarantine              Move invalid runs into quarantine\n  --quarantine-dir <path>   Quarantine directory override\n  --output <path>           Write JSON report to path\n  --lenient                 Downgrade schema errors to warnings where possible\n  --no-orphaned             Skip orphaned file detection\n  --no-metrics              Skip metrics.jsonl validation\n  --no-telemetry            Skip telemetry.jsonl validation\n  --audit                   Enable governance audit logging\n  --audit-log <path>        Audit log path override\n  --audit-verify            Verify audit log integrity after validation\n  --no-audit-verify         Skip audit log verification\n  --audit-expected-root <h> Expected Merkle root for audit verification\n  --audit-proofs            Include Merkle proofs in audit verification output\n  --audit-proof-samples <n> Max number of audit proofs to include\n  --no-remediation          Skip remediation ticket generation\n\nOPTIONS (audit-verify):\n  --audit-log <path>        Audit log path to verify\n  --expected-root <hash>    Expected Merkle root to verify against\n  --proofs                  Include Merkle proofs in the output\n  --max-proofs <n>          Maximum proofs to include (default: 5)\n  --output <path>           Write JSON report to path\n\nOPTIONS (train-linear):\n  --targets <n>            Number of output targets (default: 1)\n  --noise <f>              Noise stddev for synthetic data (default: 0.05)\n\nOPTIONS (train-mlp):\n  --classes <n>            Number of classes (default: 3)\n  --hidden <n>             Hidden layer size (default: 16)\n  --cluster-std <f>        Cluster stddev for synthetic data (default: 0.35)\n  -h, --help               Print this help text\n"
     );
 }
 
@@ -336,6 +338,24 @@ fn run_runs_validate(args: &[String]) -> Result<()> {
         config.audit_log = true;
         config.audit_log_path = Some(audit_log_path.into());
     }
+    if parser.has_flag("no-audit-verify") {
+        config.audit_verify = false;
+    }
+    if parser.has_flag("audit-verify") {
+        config.audit_verify = true;
+    }
+    if let Some(expected_root) = parser.get("audit-expected-root")? {
+        config.audit_expected_root = Some(expected_root);
+    }
+    if parser.has_flag("audit-proofs") {
+        config.audit_include_proofs = true;
+    }
+    if let Some(samples) = parser.get_usize("audit-proof-samples")? {
+        config.audit_max_proofs = samples;
+    }
+    if parser.has_flag("no-remediation") {
+        config.emit_remediation = false;
+    }
 
     let store = ExperimentStore::new(runs_dir)?;
     let report = store.validate_runs(&config)?;
@@ -347,6 +367,45 @@ fn run_runs_validate(args: &[String]) -> Result<()> {
         })?;
         std::fs::write(&output_path, json).map_err(|err| TorchError::Experiment {
             op: "cli.runs_validate",
+            msg: format!("failed to write report {}: {err}", output_path),
+        })?;
+    }
+    Ok(())
+}
+
+fn run_audit_verify(args: &[String]) -> Result<()> {
+    let parser = ArgParser::new(args);
+    let runs_dir = parser
+        .get("runs-dir")?
+        .unwrap_or_else(|| "runs".to_string());
+    let output = parser.get("output")?;
+    let audit_log = parser
+        .get("audit-log")?
+        .map(|value| value.into())
+        .unwrap_or_else(|| {
+            let mut path = std::path::PathBuf::from(&runs_dir);
+            path.push("audit");
+            path.push("run_governance_audit.jsonl");
+            path
+        });
+    let expected_root = parser.get("expected-root")?;
+    let mut config = AuditVerificationConfig::default();
+    config.expected_root = expected_root;
+    if parser.has_flag("proofs") {
+        config.include_proofs = true;
+    }
+    if let Some(max_proofs) = parser.get_usize("max-proofs")? {
+        config.max_proofs = max_proofs;
+    }
+    let report = verify_audit_log(&audit_log, &config)?;
+    print_audit_report(&report);
+    if let Some(output_path) = output {
+        let json = serde_json::to_string_pretty(&report).map_err(|err| TorchError::Experiment {
+            op: "cli.audit_verify",
+            msg: format!("failed to serialize report: {err}"),
+        })?;
+        std::fs::write(&output_path, json).map_err(|err| TorchError::Experiment {
+            op: "cli.audit_verify",
             msg: format!("failed to write report {}: {err}", output_path),
         })?;
     }
@@ -446,6 +505,34 @@ fn print_governance_report(report: &RunGovernanceReport) {
         let root = report.audit_merkle_root.as_deref().unwrap_or("n/a");
         println!("audit log: {} (merkle_root={})", path.display(), root);
     }
+    if let Some(verification) = &report.audit_verification {
+        println!(
+            "audit verification: status={:?}, events={}, issues={}, duration_ms={:.2}",
+            verification.status,
+            verification.total_events,
+            verification.issues.len(),
+            verification.duration_ms
+        );
+        if let Some(expected) = &verification.expected_root {
+            let matches = verification
+                .matches_expected_root
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".to_string());
+            let actual = verification.merkle_root.as_deref().unwrap_or("n/a");
+            println!(
+                "audit root: expected={}, actual={}, matches={}",
+                expected, actual, matches
+            );
+        }
+        if !verification.issues.is_empty() {
+            for issue in &verification.issues {
+                println!(
+                    "  - audit issue {:?} (line={}): {}",
+                    issue.kind, issue.line, issue.message
+                );
+            }
+        }
+    }
     for result in &report.results {
         println!(
             "- {}: {:?} ({} findings, {:.2} ms)",
@@ -462,6 +549,63 @@ fn print_governance_report(report: &RunGovernanceReport) {
         }
         if let Some(path) = &result.quarantine_path {
             println!("  - quarantined to {}", path.display());
+        }
+    }
+    if report.remediation.total_tickets > 0 {
+        println!(
+            "remediation tickets: total={}, high_severity={}, quarantined={}",
+            report.remediation.total_tickets,
+            report.remediation.high_severity,
+            report.remediation.quarantined
+        );
+        for ticket in &report.remediation.tickets {
+            println!(
+                "  - {} (run={}, severity={:?})",
+                ticket.ticket_id, ticket.run_id, ticket.severity
+            );
+            for action in &ticket.recommended_actions {
+                println!("    - action: {action}");
+            }
+        }
+    }
+}
+
+fn print_audit_report(report: &rustorch::audit::AuditVerificationReport) {
+    println!(
+        "audit verification: status={:?}, events={}, issues={}, duration_ms={:.2}",
+        report.status,
+        report.total_events,
+        report.issues.len(),
+        report.duration_ms
+    );
+    if let Some(root) = &report.merkle_root {
+        println!("merkle_root: {root}");
+    }
+    if let Some(expected) = &report.expected_root {
+        let matches = report
+            .matches_expected_root
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string());
+        println!("expected_root: {expected} (matches={matches})");
+    }
+    if !report.issues.is_empty() {
+        println!("issues:");
+        for issue in &report.issues {
+            println!(
+                "  - {:?} (line={}, index={:?}): {}",
+                issue.kind, issue.line, issue.index, issue.message
+            );
+        }
+    }
+    if !report.proofs.is_empty() {
+        println!("proofs:");
+        for proof in &report.proofs {
+            println!(
+                "  - leaf_index={}, valid={}, path_len={}",
+                proof.leaf_index,
+                proof.valid,
+                proof.path.len()
+            );
         }
     }
 }
