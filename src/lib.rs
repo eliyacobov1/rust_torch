@@ -22,9 +22,11 @@ pub use data::{
 };
 pub use error::{Result, TorchError};
 pub use experiment::{
-    CsvExportReport, ExperimentStore, LayoutSummary, MetricStats, MetricsLogger,
-    MetricsLoggerConfig, MetricsSummary, RunFilter, RunHandle, RunMetadata, RunOverview, RunStatus,
-    RunSummary, TelemetryStats, TelemetrySummary,
+    ComparisonEdge, CsvExportReport, ExperimentStore, LayoutSummary, MetricAggregation,
+    MetricDelta, MetricStats, MetricsLogger, MetricsLoggerConfig, MetricsSummary,
+    RunComparisonConfig, RunComparisonGraph, RunComparisonReport, RunDeltaReport, RunDeltaSummary,
+    RunFilter, RunHandle, RunMetadata, RunOverview, RunStatus, RunSummary, TelemetryStats,
+    TelemetrySummary,
 };
 pub use models::{LinearRegression, MlpClassifier};
 pub use optim::{Optimizer, Sgd};

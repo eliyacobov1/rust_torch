@@ -2,7 +2,10 @@ use std::env;
 
 use rustorch::api::RustorchService;
 use rustorch::data::{SyntheticClassificationConfig, SyntheticRegressionConfig};
-use rustorch::experiment::{CsvExportReport, ExperimentStore, RunFilter, RunStatus};
+use rustorch::experiment::{
+    CsvExportReport, ExperimentStore, MetricAggregation, RunComparisonConfig, RunComparisonReport,
+    RunFilter, RunStatus,
+};
 use rustorch::training::{ClassificationTrainerConfig, TrainerConfig};
 use rustorch::{Result, TorchError};
 
@@ -26,6 +29,7 @@ fn run() -> Result<()> {
         "runs-list" => run_runs_list(&args[2..]),
         "runs-summary" => run_runs_summary(&args[2..]),
         "runs-export-csv" => run_runs_export_csv(&args[2..]),
+        "runs-compare" => run_runs_compare(&args[2..]),
         "--help" | "-h" => {
             print_usage();
             Ok(())
@@ -141,7 +145,7 @@ fn run_train_mlp(args: &[String]) -> Result<()> {
 
 fn print_usage() {
     println!(
-        "rustorch_cli\n\nUSAGE:\n  rustorch_cli train-linear [options]\n  rustorch_cli train-mlp [options]\n  rustorch_cli runs-list [options]\n  rustorch_cli runs-summary [options]\n  rustorch_cli runs-export-csv [options]\n\nOPTIONS (shared):\n  --runs-dir <path>        Directory for experiment runs (default: runs)\n  --samples <n>            Number of samples (default: 128)\n  --features <n>           Number of input features (default: 4)\n  --epochs <n>             Training epochs (default: 10)\n  --batch-size <n>         Batch size (default: 16)\n  --lr <f>                 Learning rate (default: 1e-2)\n  --weight-decay <f>       Weight decay (default: 0)\n  --seed <n>               RNG seed (default: 42)\n  --run-name <name>        Run name label\n  --log-every <n>          Log metrics every n steps (default: 10)\n  --checkpoint-every <n>   Save checkpoint every n epochs (default: 1)\n\nOPTIONS (runs-list):\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-summary):\n  --run-id <id>            Run identifier to summarize\n\nOPTIONS (runs-export-csv):\n  --output <path>          Output CSV path (default: runs_summary.csv)\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (train-linear):\n  --targets <n>            Number of output targets (default: 1)\n  --noise <f>              Noise stddev for synthetic data (default: 0.05)\n\nOPTIONS (train-mlp):\n  --classes <n>            Number of classes (default: 3)\n  --hidden <n>             Hidden layer size (default: 16)\n  --cluster-std <f>        Cluster stddev for synthetic data (default: 0.35)\n  -h, --help               Print this help text\n"
+        "rustorch_cli\n\nUSAGE:\n  rustorch_cli train-linear [options]\n  rustorch_cli train-mlp [options]\n  rustorch_cli runs-list [options]\n  rustorch_cli runs-summary [options]\n  rustorch_cli runs-export-csv [options]\n  rustorch_cli runs-compare [options]\n\nOPTIONS (shared):\n  --runs-dir <path>        Directory for experiment runs (default: runs)\n  --samples <n>            Number of samples (default: 128)\n  --features <n>           Number of input features (default: 4)\n  --epochs <n>             Training epochs (default: 10)\n  --batch-size <n>         Batch size (default: 16)\n  --lr <f>                 Learning rate (default: 1e-2)\n  --weight-decay <f>       Weight decay (default: 0)\n  --seed <n>               RNG seed (default: 42)\n  --run-name <name>        Run name label\n  --log-every <n>          Log metrics every n steps (default: 10)\n  --checkpoint-every <n>   Save checkpoint every n epochs (default: 1)\n\nOPTIONS (runs-list):\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-summary):\n  --run-id <id>            Run identifier to summarize\n\nOPTIONS (runs-export-csv):\n  --output <path>          Output CSV path (default: runs_summary.csv)\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-compare):\n  --run-ids <csv>          Explicit run IDs to compare\n  --baseline-id <id>       Run ID to use as baseline (default: first in set)\n  --metric-agg <name>      Aggregation: min|max|mean|p50|p95|last (default: last)\n  --top-k <n>              Top deltas to print per run (default: 5)\n  --format <name>          Output format: table|json (default: table)\n  --no-graph               Skip pairwise comparison graph\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (train-linear):\n  --targets <n>            Number of output targets (default: 1)\n  --noise <f>              Noise stddev for synthetic data (default: 0.05)\n\nOPTIONS (train-mlp):\n  --classes <n>            Number of classes (default: 3)\n  --hidden <n>             Hidden layer size (default: 16)\n  --cluster-std <f>        Cluster stddev for synthetic data (default: 0.35)\n  -h, --help               Print this help text\n"
     );
 }
 
@@ -164,6 +168,11 @@ impl ArgParser {
             .position(|value| value == &flag)
             .and_then(|idx| self.args.get(idx + 1))
             .cloned())
+    }
+
+    fn has_flag(&self, key: &str) -> bool {
+        let flag = format!("--{key}");
+        self.args.iter().any(|value| value == &flag)
     }
 
     fn get_csv(&self, key: &str) -> Result<Option<Vec<String>>> {
@@ -291,6 +300,57 @@ fn run_runs_export_csv(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn run_runs_compare(args: &[String]) -> Result<()> {
+    let parser = ArgParser::new(args);
+    let runs_dir = parser
+        .get("runs-dir")?
+        .unwrap_or_else(|| "runs".to_string());
+    let run_ids = parser.get_csv("run-ids")?.unwrap_or_default();
+    let baseline_id = parser.get("baseline-id")?;
+    let tags = parser.get_csv("tags")?.unwrap_or_default();
+    let statuses = parser.get("status")?.map(parse_status).transpose()?;
+    let filter = RunFilter { tags, statuses };
+    let metric_aggregation = parser
+        .get("metric-agg")?
+        .map(|value| MetricAggregation::from_str(&value))
+        .transpose()?
+        .unwrap_or(MetricAggregation::Last);
+    let top_k = parser.get_usize("top-k")?.unwrap_or(5);
+    let format = parser.get("format")?.unwrap_or_else(|| "table".to_string());
+    let build_graph = !parser.has_flag("no-graph");
+
+    let config = RunComparisonConfig {
+        run_ids,
+        filter,
+        baseline_id,
+        metric_aggregation,
+        top_k,
+        build_graph,
+    };
+
+    let store = ExperimentStore::new(runs_dir)?;
+    let report = store.compare_runs(&config)?;
+
+    match format.as_str() {
+        "table" => print_compare_report(&report),
+        "json" => {
+            let json =
+                serde_json::to_string_pretty(&report).map_err(|err| TorchError::Experiment {
+                    op: "cli.runs_compare",
+                    msg: format!("failed to serialize report: {err}"),
+                })?;
+            println!("{json}");
+        }
+        other => {
+            return Err(TorchError::InvalidArgument {
+                op: "cli.runs_compare",
+                msg: format!("unknown format {other}"),
+            })
+        }
+    }
+    Ok(())
+}
+
 fn parse_status(value: String) -> Result<Vec<RunStatus>> {
     match value.to_ascii_lowercase().as_str() {
         "running" => Ok(vec![RunStatus::Running]),
@@ -318,4 +378,69 @@ fn print_export_report(report: &CsvExportReport) {
         report.validation_checks,
         report.validation_ms
     );
+}
+
+fn print_compare_report(report: &RunComparisonReport) {
+    println!(
+        "baseline: {} ({})",
+        report.baseline_id, report.baseline_name
+    );
+    println!(
+        "metric aggregation: {:?}, generated_at_unix: {}",
+        report.metric_aggregation, report.generated_at_unix
+    );
+    println!();
+    println!(
+        "{:<24} {:<18} {:<10} {:>14} {:>14} {:>10}",
+        "run_id", "name", "status", "mean_abs_delta", "mean_delta", "missing"
+    );
+    println!("{}", "-".repeat(96));
+    for comparison in &report.comparisons {
+        println!(
+            "{:<24} {:<18} {:<10?} {:>14.6} {:>14.6} {:>10}",
+            comparison.run_id,
+            comparison.name,
+            comparison.status,
+            comparison.summary.mean_abs_delta,
+            comparison.summary.mean_delta,
+            comparison.summary.missing_metrics
+        );
+        for delta in comparison.top_deltas.iter() {
+            let pct = delta
+                .delta_pct
+                .map(|value| format!("{value:.2}%"))
+                .unwrap_or_else(|| "n/a".to_string());
+            println!(
+                "  - {:<20} base={:>10.4} cand={:>10.4} delta={:>10.4} ({:>8})",
+                delta.metric, delta.baseline, delta.candidate, delta.delta, pct
+            );
+        }
+        if !comparison.missing_metrics.is_empty() {
+            println!("  - missing: {}", comparison.missing_metrics.join(", "));
+        }
+        println!();
+    }
+
+    if !report.top_deltas.is_empty() {
+        println!("global top deltas (by absolute change):");
+        for delta in &report.top_deltas {
+            let pct = delta
+                .delta_pct
+                .map(|value| format!("{value:.2}%"))
+                .unwrap_or_else(|| "n/a".to_string());
+            println!(
+                "  - {:<20} base={:>10.4} cand={:>10.4} delta={:>10.4} ({:>8})",
+                delta.metric, delta.baseline, delta.candidate, delta.delta, pct
+            );
+        }
+    }
+
+    if let Some(graph) = &report.graph {
+        println!();
+        println!(
+            "comparison graph: {} nodes, {} edges",
+            graph.nodes.len(),
+            graph.edges.len()
+        );
+    }
 }
