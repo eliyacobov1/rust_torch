@@ -1895,8 +1895,13 @@ fn list_run_dirs(root: &Path) -> Result<Vec<PathBuf>> {
             op: "experiment_store.list_run_dirs",
             msg: format!("failed to read dir entry type: {err}"),
         })?;
-        if file_type.is_dir() {
-            runs.push(entry.path());
+        if !file_type.is_dir() {
+            continue;
+        }
+        let run_dir = entry.path();
+        match read_metadata(&run_dir) {
+            Ok(_) => runs.push(run_dir),
+            Err(err) => warn!("Skipping non-run dir {}: {err}", run_dir.display()),
         }
     }
     runs.sort();
