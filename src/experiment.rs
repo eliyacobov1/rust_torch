@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -9,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use log::{info, warn};
 use rand::{distributions::Alphanumeric, Rng};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -105,6 +107,132 @@ pub struct RunSummary {
     pub metrics: MetricsSummary,
     pub telemetry: Option<TelemetrySummary>,
     pub layout: LayoutSummary,
+}
+
+/// Metric aggregation to compare summaries across runs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MetricAggregation {
+    Min,
+    Max,
+    Mean,
+    P50,
+    P95,
+    Last,
+}
+
+impl MetricAggregation {
+    pub fn from_str(value: &str) -> Result<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "min" => Ok(Self::Min),
+            "max" => Ok(Self::Max),
+            "mean" => Ok(Self::Mean),
+            "p50" => Ok(Self::P50),
+            "p95" => Ok(Self::P95),
+            "last" => Ok(Self::Last),
+            other => Err(TorchError::InvalidArgument {
+                op: "metric_aggregation.from_str",
+                msg: format!("unknown aggregation {other}"),
+            }),
+        }
+    }
+
+    pub fn value(self, stats: &MetricStats) -> f32 {
+        match self {
+            Self::Min => stats.min,
+            Self::Max => stats.max,
+            Self::Mean => stats.mean,
+            Self::P50 => stats.p50,
+            Self::P95 => stats.p95,
+            Self::Last => stats.last,
+        }
+    }
+}
+
+/// Configuration for comparing multiple runs.
+#[derive(Debug, Clone)]
+pub struct RunComparisonConfig {
+    pub run_ids: Vec<String>,
+    pub filter: RunFilter,
+    pub baseline_id: Option<String>,
+    pub metric_aggregation: MetricAggregation,
+    pub top_k: usize,
+    pub build_graph: bool,
+}
+
+impl Default for RunComparisonConfig {
+    fn default() -> Self {
+        Self {
+            run_ids: Vec::new(),
+            filter: RunFilter::default(),
+            baseline_id: None,
+            metric_aggregation: MetricAggregation::Last,
+            top_k: 5,
+            build_graph: true,
+        }
+    }
+}
+
+/// Per-metric delta between the baseline and a comparison run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricDelta {
+    pub metric: String,
+    pub baseline: f32,
+    pub candidate: f32,
+    pub delta: f32,
+    pub delta_pct: Option<f32>,
+}
+
+/// Aggregated delta statistics for a comparison run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunDeltaSummary {
+    pub total_metrics: usize,
+    pub compared_metrics: usize,
+    pub missing_metrics: usize,
+    pub mean_abs_delta: f32,
+    pub mean_delta: f32,
+}
+
+/// Comparison output for a single run against a baseline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunDeltaReport {
+    pub run_id: String,
+    pub name: String,
+    pub status: RunStatus,
+    pub deltas: Vec<MetricDelta>,
+    pub top_deltas: Vec<MetricDelta>,
+    pub missing_metrics: Vec<String>,
+    pub summary: RunDeltaSummary,
+}
+
+/// Pairwise edge describing how one run compares to another.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComparisonEdge {
+    pub from_run: String,
+    pub to_run: String,
+    pub compared_metrics: usize,
+    pub wins: usize,
+    pub losses: usize,
+    pub ties: usize,
+    pub mean_delta: f32,
+}
+
+/// Graph summary of pairwise run comparisons.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunComparisonGraph {
+    pub nodes: Vec<String>,
+    pub edges: Vec<ComparisonEdge>,
+}
+
+/// Summary report for comparing multiple runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunComparisonReport {
+    pub baseline_id: String,
+    pub baseline_name: String,
+    pub generated_at_unix: u64,
+    pub metric_aggregation: MetricAggregation,
+    pub comparisons: Vec<RunDeltaReport>,
+    pub graph: Option<RunComparisonGraph>,
+    pub top_deltas: Vec<MetricDelta>,
 }
 
 /// Filter criteria for querying runs within an experiment store.
@@ -429,6 +557,115 @@ impl ExperimentStore {
             validation_ms,
         })
     }
+
+    /// Compare multiple runs and return a structured delta report.
+    pub fn compare_runs(&self, config: &RunComparisonConfig) -> Result<RunComparisonReport> {
+        let mut run_ids = if config.run_ids.is_empty() {
+            let overviews = self.list_overviews(&config.filter)?;
+            overviews
+                .into_iter()
+                .map(|overview| overview.metadata.id)
+                .collect::<Vec<String>>()
+        } else {
+            config.run_ids.clone()
+        };
+
+        run_ids.sort();
+        run_ids.dedup();
+        if run_ids.len() < 2 {
+            return Err(TorchError::InvalidArgument {
+                op: "experiment_store.compare_runs",
+                msg: "at least two run IDs are required for comparison".to_string(),
+            });
+        }
+
+        let baseline_id = config
+            .baseline_id
+            .clone()
+            .unwrap_or_else(|| run_ids[0].clone());
+        if !run_ids.iter().any(|id| id == &baseline_id) {
+            return Err(TorchError::InvalidArgument {
+                op: "experiment_store.compare_runs",
+                msg: format!("baseline id {baseline_id} not found in run set"),
+            });
+        }
+
+        info!(
+            "Comparing {} runs (baseline={})",
+            run_ids.len(),
+            baseline_id
+        );
+
+        let summary_results = run_ids
+            .par_iter()
+            .map(|run_id| (run_id.clone(), self.read_summary(run_id)))
+            .collect::<Vec<(String, Result<RunSummary>)>>();
+
+        let mut summaries = BTreeMap::new();
+        for (run_id, result) in summary_results {
+            let summary = result?;
+            if summary.run_id != run_id {
+                return Err(TorchError::Experiment {
+                    op: "experiment_store.compare_runs",
+                    msg: format!(
+                        "run id mismatch for summary: expected {run_id}, got {}",
+                        summary.run_id
+                    ),
+                });
+            }
+            summaries.insert(run_id, summary);
+        }
+
+        let baseline = summaries.get(&baseline_id).ok_or(TorchError::Experiment {
+            op: "experiment_store.compare_runs",
+            msg: format!("baseline summary {baseline_id} not found"),
+        })?;
+
+        if baseline.metrics.metrics.is_empty() {
+            return Err(TorchError::Experiment {
+                op: "experiment_store.compare_runs",
+                msg: "baseline run contains no metrics to compare".to_string(),
+            });
+        }
+
+        let mut comparisons = Vec::new();
+        let mut global_top = TopK::new(config.top_k);
+        for (run_id, summary) in &summaries {
+            if run_id == &baseline_id {
+                continue;
+            }
+            let report =
+                build_run_delta_report(baseline, summary, config.metric_aggregation, config.top_k);
+            for entry in &report.deltas {
+                global_top.insert(entry.clone());
+            }
+            comparisons.push(report);
+        }
+
+        comparisons.sort_by(|a, b| {
+            a.summary
+                .mean_abs_delta
+                .total_cmp(&b.summary.mean_abs_delta)
+        });
+        let graph = if config.build_graph {
+            Some(build_comparison_graph(
+                &summaries,
+                config.metric_aggregation,
+            ))
+        } else {
+            None
+        };
+
+        Ok(RunComparisonReport {
+            baseline_id: baseline_id.clone(),
+            baseline_name: baseline.name.clone(),
+            generated_at_unix: now_unix_seconds()?,
+            metric_aggregation: config.metric_aggregation,
+            comparisons,
+            graph,
+            top_deltas: global_top.into_sorted_vec_desc(),
+        })
+    }
 }
 
 /// Handle to a live experiment run, used to record metrics and artifacts.
@@ -596,6 +833,241 @@ impl RunHandle {
     fn run_dir(&self) -> PathBuf {
         self.store.root.join(&self.metadata.id)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetricDirection {
+    HigherBetter,
+    LowerBetter,
+}
+
+fn metric_direction(metric: &str) -> MetricDirection {
+    let key = metric.to_ascii_lowercase();
+    let lower_better_tokens = [
+        "loss", "error", "mse", "rmse", "mae", "l1", "l2", "latency", "time",
+    ];
+    if lower_better_tokens.iter().any(|token| key.contains(token)) {
+        MetricDirection::LowerBetter
+    } else {
+        MetricDirection::HigherBetter
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DeltaEntry {
+    delta_abs: f32,
+    delta: MetricDelta,
+}
+
+impl PartialEq for DeltaEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.delta_abs.total_cmp(&other.delta_abs) == Ordering::Equal
+    }
+}
+
+impl Eq for DeltaEntry {}
+
+impl PartialOrd for DeltaEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DeltaEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.delta_abs.total_cmp(&other.delta_abs)
+    }
+}
+
+#[derive(Debug)]
+struct TopK {
+    k: usize,
+    heap: BinaryHeap<Reverse<DeltaEntry>>,
+}
+
+impl TopK {
+    fn new(k: usize) -> Self {
+        Self {
+            k,
+            heap: BinaryHeap::new(),
+        }
+    }
+
+    fn insert(&mut self, delta: MetricDelta) {
+        if self.k == 0 {
+            return;
+        }
+        let entry = DeltaEntry {
+            delta_abs: delta.delta.abs(),
+            delta,
+        };
+        if self.heap.len() < self.k {
+            self.heap.push(Reverse(entry));
+            return;
+        }
+        if let Some(Reverse(min)) = self.heap.peek() {
+            if entry.delta_abs > min.delta_abs {
+                self.heap.pop();
+                self.heap.push(Reverse(entry));
+            }
+        }
+    }
+
+    fn into_sorted_vec_desc(mut self) -> Vec<MetricDelta> {
+        let mut values = Vec::with_capacity(self.heap.len());
+        while let Some(Reverse(entry)) = self.heap.pop() {
+            values.push(entry.delta);
+        }
+        values.sort_by(|a, b| b.delta.abs().total_cmp(&a.delta.abs()));
+        values
+    }
+}
+
+fn build_run_delta_report(
+    baseline: &RunSummary,
+    candidate: &RunSummary,
+    aggregation: MetricAggregation,
+    top_k: usize,
+) -> RunDeltaReport {
+    let mut deltas = Vec::new();
+    let mut missing_metrics = Vec::new();
+    let mut abs_sum = 0.0_f32;
+    let mut sum = 0.0_f32;
+    let mut compared = 0_usize;
+    for (metric, baseline_stats) in &baseline.metrics.metrics {
+        match candidate.metrics.metrics.get(metric) {
+            Some(candidate_stats) => {
+                let baseline_value = aggregation.value(baseline_stats);
+                let candidate_value = aggregation.value(candidate_stats);
+                let delta = candidate_value - baseline_value;
+                let delta_pct = if baseline_value.abs() > f32::EPSILON {
+                    Some(delta / baseline_value * 100.0)
+                } else {
+                    None
+                };
+                deltas.push(MetricDelta {
+                    metric: metric.clone(),
+                    baseline: baseline_value,
+                    candidate: candidate_value,
+                    delta,
+                    delta_pct,
+                });
+                abs_sum += delta.abs();
+                sum += delta;
+                compared += 1;
+            }
+            None => missing_metrics.push(metric.clone()),
+        }
+    }
+
+    let mut top = TopK::new(top_k);
+    for delta in &deltas {
+        top.insert(delta.clone());
+    }
+    let mean_abs_delta = if compared > 0 {
+        abs_sum / compared as f32
+    } else {
+        0.0
+    };
+    let mean_delta = if compared > 0 {
+        sum / compared as f32
+    } else {
+        0.0
+    };
+    RunDeltaReport {
+        run_id: candidate.run_id.clone(),
+        name: candidate.name.clone(),
+        status: candidate.status.clone(),
+        top_deltas: top.into_sorted_vec_desc(),
+        missing_metrics,
+        summary: RunDeltaSummary {
+            total_metrics: baseline.metrics.metrics.len(),
+            compared_metrics: compared,
+            missing_metrics: baseline.metrics.metrics.len().saturating_sub(compared),
+            mean_abs_delta,
+            mean_delta,
+        },
+        deltas,
+    }
+}
+
+fn build_comparison_graph(
+    summaries: &BTreeMap<String, RunSummary>,
+    aggregation: MetricAggregation,
+) -> RunComparisonGraph {
+    let nodes = summaries.keys().cloned().collect::<Vec<String>>();
+    let mut edges = Vec::new();
+    for i in 0..nodes.len() {
+        for j in (i + 1)..nodes.len() {
+            let from_id = &nodes[i];
+            let to_id = &nodes[j];
+            let from = summaries.get(from_id);
+            let to = summaries.get(to_id);
+            if let (Some(from_summary), Some(to_summary)) = (from, to) {
+                let (edge_a, edge_b) = build_pairwise_edges(from_summary, to_summary, aggregation);
+                edges.push(edge_a);
+                edges.push(edge_b);
+            }
+        }
+    }
+    RunComparisonGraph { nodes, edges }
+}
+
+fn build_pairwise_edges(
+    from: &RunSummary,
+    to: &RunSummary,
+    aggregation: MetricAggregation,
+) -> (ComparisonEdge, ComparisonEdge) {
+    let mut compared_metrics = 0_usize;
+    let mut wins = 0_usize;
+    let mut losses = 0_usize;
+    let mut ties = 0_usize;
+    let mut delta_sum = 0.0_f32;
+
+    for (metric, from_stats) in &from.metrics.metrics {
+        if let Some(to_stats) = to.metrics.metrics.get(metric) {
+            compared_metrics += 1;
+            let from_value = aggregation.value(from_stats);
+            let to_value = aggregation.value(to_stats);
+            let directional_delta = match metric_direction(metric) {
+                MetricDirection::HigherBetter => from_value - to_value,
+                MetricDirection::LowerBetter => to_value - from_value,
+            };
+            if directional_delta > 0.0 {
+                wins += 1;
+            } else if directional_delta < 0.0 {
+                losses += 1;
+            } else {
+                ties += 1;
+            }
+            delta_sum += directional_delta;
+        }
+    }
+
+    let mean_delta = if compared_metrics > 0 {
+        delta_sum / compared_metrics as f32
+    } else {
+        0.0
+    };
+    let edge_a = ComparisonEdge {
+        from_run: from.run_id.clone(),
+        to_run: to.run_id.clone(),
+        compared_metrics,
+        wins,
+        losses,
+        ties,
+        mean_delta,
+    };
+    let edge_b = ComparisonEdge {
+        from_run: to.run_id.clone(),
+        to_run: from.run_id.clone(),
+        compared_metrics,
+        wins: losses,
+        losses: wins,
+        ties,
+        mean_delta: -mean_delta,
+    };
+    (edge_a, edge_b)
 }
 
 fn generate_run_id(name: &str) -> Result<String> {
