@@ -20,7 +20,7 @@ use crate::audit::{
 };
 use crate::checkpoint::{save_state_dict, StateDict};
 use crate::error::{Result, TorchError};
-use crate::governance::{build_governance_schedule, GovernanceScheduleEntry};
+use crate::governance::{build_governance_schedule, deterministic_run_order, GovernanceScheduleEntry};
 use crate::telemetry::{JsonlSink, TelemetryEvent, TelemetryRecorder};
 use crate::tensor::{layout_stats, reset_layout_stats};
 
@@ -173,6 +173,8 @@ pub struct RunComparisonConfig {
     pub metric_aggregation: MetricAggregation,
     pub top_k: usize,
     pub build_graph: bool,
+    pub deterministic_seed: Option<u64>,
+    pub regression_gate: Option<RegressionGateConfig>,
 }
 
 impl Default for RunComparisonConfig {
@@ -184,6 +186,8 @@ impl Default for RunComparisonConfig {
             metric_aggregation: MetricAggregation::Last,
             top_k: 5,
             build_graph: true,
+            deterministic_seed: None,
+            regression_gate: None,
         }
     }
 }
@@ -218,6 +222,8 @@ pub struct RunDeltaReport {
     pub top_deltas: Vec<MetricDelta>,
     pub missing_metrics: Vec<String>,
     pub summary: RunDeltaSummary,
+    #[serde(default)]
+    pub regression_gate: Option<RegressionGateReport>,
 }
 
 /// Pairwise edge describing how one run compares to another.
@@ -239,6 +245,78 @@ pub struct RunComparisonGraph {
     pub edges: Vec<ComparisonEdge>,
 }
 
+/// Regression gate severity for guardrail policy violations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RegressionSeverity {
+    Blocker,
+    Major,
+    Minor,
+}
+
+/// Regression gate policy for a specific metric.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegressionPolicy {
+    pub metric: String,
+    pub max_regression_pct: Option<f32>,
+    pub max_regression_abs: Option<f32>,
+    pub severity: RegressionSeverity,
+}
+
+/// Configuration for applying regression gate checks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegressionGateConfig {
+    pub policies: Vec<RegressionPolicy>,
+    pub allow_missing_metrics: bool,
+    pub warn_only: bool,
+}
+
+impl Default for RegressionGateConfig {
+    fn default() -> Self {
+        Self {
+            policies: Vec::new(),
+            allow_missing_metrics: false,
+            warn_only: false,
+        }
+    }
+}
+
+/// Status output for a regression gate evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RegressionGateStatus {
+    Pass,
+    Fail,
+}
+
+/// Finding emitted during regression gate evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegressionGateFinding {
+    pub metric: String,
+    pub baseline: Option<f32>,
+    pub candidate: Option<f32>,
+    pub delta: Option<f32>,
+    pub delta_pct: Option<f32>,
+    pub severity: RegressionSeverity,
+    pub message: String,
+}
+
+/// Regression gate report for a candidate run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegressionGateReport {
+    pub baseline_id: String,
+    pub candidate_id: String,
+    pub status: RegressionGateStatus,
+    pub findings: Vec<RegressionGateFinding>,
+    pub evaluated_at_unix: u64,
+}
+
+/// Delta index for fast baseline comparisons.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeltaIndex {
+    pub baseline_id: String,
+    pub metric_aggregation: MetricAggregation,
+    pub metrics: BTreeMap<String, f32>,
+}
+
 /// Summary report for comparing multiple runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunComparisonReport {
@@ -249,6 +327,8 @@ pub struct RunComparisonReport {
     pub comparisons: Vec<RunDeltaReport>,
     pub graph: Option<RunComparisonGraph>,
     pub top_deltas: Vec<MetricDelta>,
+    #[serde(default)]
+    pub delta_index: Option<DeltaIndex>,
 }
 
 /// Filter criteria for querying runs within an experiment store.
@@ -921,10 +1001,16 @@ impl ExperimentStore {
             });
         }
 
+        let ordered_run_ids = if let Some(seed) = config.deterministic_seed {
+            deterministic_run_order(seed, &run_ids)
+        } else {
+            run_ids.clone()
+        };
+
         let baseline_id = config
             .baseline_id
             .clone()
-            .unwrap_or_else(|| run_ids[0].clone());
+            .unwrap_or_else(|| ordered_run_ids[0].clone());
         if !run_ids.iter().any(|id| id == &baseline_id) {
             return Err(TorchError::InvalidArgument {
                 op: "experiment_store.compare_runs",
@@ -934,11 +1020,11 @@ impl ExperimentStore {
 
         info!(
             "Comparing {} runs (baseline={})",
-            run_ids.len(),
+            ordered_run_ids.len(),
             baseline_id
         );
 
-        let summary_results = run_ids
+        let summary_results = ordered_run_ids
             .par_iter()
             .map(|run_id| (run_id.clone(), self.read_summary(run_id)))
             .collect::<Vec<(String, Result<RunSummary>)>>();
@@ -958,26 +1044,29 @@ impl ExperimentStore {
             summaries.insert(run_id, summary);
         }
 
-        let baseline = summaries.get(&baseline_id).ok_or(TorchError::Experiment {
-            op: "experiment_store.compare_runs",
-            msg: format!("baseline summary {baseline_id} not found"),
-        })?;
-
-        if baseline.metrics.metrics.is_empty() {
-            return Err(TorchError::Experiment {
-                op: "experiment_store.compare_runs",
-                msg: "baseline run contains no metrics to compare".to_string(),
-            });
-        }
+        let engine = ExperimentGraphEngine::new(
+            &summaries,
+            &baseline_id,
+            config.metric_aggregation,
+            &ordered_run_ids,
+        )?;
 
         let mut comparisons = Vec::new();
         let mut global_top = TopK::new(config.top_k);
-        for (run_id, summary) in &summaries {
+        for run_id in &ordered_run_ids {
             if run_id == &baseline_id {
                 continue;
             }
-            let report =
-                build_run_delta_report(baseline, summary, config.metric_aggregation, config.top_k);
+            let report = engine.compare_run(run_id, config.top_k, config.regression_gate.as_ref())?;
+            if let Some(gate) = &report.regression_gate {
+                if gate.status == RegressionGateStatus::Fail {
+                    warn!(
+                        "Regression gate failed for run {} ({} findings)",
+                        report.run_id,
+                        gate.findings.len()
+                    );
+                }
+            }
             for entry in &report.deltas {
                 global_top.insert(entry.clone());
             }
@@ -990,22 +1079,20 @@ impl ExperimentStore {
                 .total_cmp(&b.summary.mean_abs_delta)
         });
         let graph = if config.build_graph {
-            Some(build_comparison_graph(
-                &summaries,
-                config.metric_aggregation,
-            ))
+            Some(engine.build_graph()?)
         } else {
             None
         };
 
         Ok(RunComparisonReport {
             baseline_id: baseline_id.clone(),
-            baseline_name: baseline.name.clone(),
+            baseline_name: engine.baseline_name().to_string(),
             generated_at_unix: now_unix_seconds()?,
             metric_aggregation: config.metric_aggregation,
             comparisons,
             graph,
             top_deltas: global_top.into_sorted_vec_desc(),
+            delta_index: Some(engine.delta_index()),
         })
     }
 }
@@ -1397,10 +1484,159 @@ impl TopK {
     }
 }
 
-fn build_run_delta_report(
-    baseline: &RunSummary,
+#[derive(Debug, Clone)]
+struct MetricSnapshot {
+    run_id: String,
+    values: BTreeMap<String, f32>,
+}
+
+#[derive(Debug)]
+struct ExperimentGraphEngine {
+    baseline_id: String,
+    summaries: BTreeMap<String, RunSummary>,
+    snapshots: BTreeMap<String, MetricSnapshot>,
+    delta_index: DeltaIndex,
+    ordered_run_ids: Vec<String>,
+}
+
+impl ExperimentGraphEngine {
+    fn new(
+        summaries: &BTreeMap<String, RunSummary>,
+        baseline_id: &str,
+        metric_aggregation: MetricAggregation,
+        ordered_run_ids: &[String],
+    ) -> Result<Self> {
+        let mut snapshots = BTreeMap::new();
+        for (run_id, summary) in summaries {
+            let mut values = BTreeMap::new();
+            for (metric, stats) in &summary.metrics.metrics {
+                values.insert(metric.clone(), metric_aggregation.value(stats));
+            }
+            snapshots.insert(
+                run_id.clone(),
+                MetricSnapshot {
+                    run_id: run_id.clone(),
+                    values,
+                },
+            );
+        }
+        let baseline_snapshot = snapshots.get(baseline_id).ok_or(TorchError::Experiment {
+            op: "experiment_graph_engine.new",
+            msg: format!("baseline summary {baseline_id} not found"),
+        })?;
+
+        if baseline_snapshot.values.is_empty() {
+            return Err(TorchError::Experiment {
+                op: "experiment_graph_engine.new",
+                msg: "baseline run contains no metrics to compare".to_string(),
+            });
+        }
+
+        let delta_index = DeltaIndex {
+            baseline_id: baseline_id.to_string(),
+            metric_aggregation,
+            metrics: baseline_snapshot.values.clone(),
+        };
+
+        Ok(Self {
+            baseline_id: baseline_id.to_string(),
+            summaries: summaries.clone(),
+            snapshots,
+            delta_index,
+            ordered_run_ids: ordered_run_ids.to_vec(),
+        })
+    }
+
+    fn baseline_name(&self) -> &str {
+        self.summaries
+            .get(&self.baseline_id)
+            .map(|summary| summary.name.as_str())
+            .unwrap_or("unknown")
+    }
+
+    fn delta_index(&self) -> DeltaIndex {
+        self.delta_index.clone()
+    }
+
+    fn compare_run(
+        &self,
+        run_id: &str,
+        top_k: usize,
+        gate_config: Option<&RegressionGateConfig>,
+    ) -> Result<RunDeltaReport> {
+        let baseline_summary = self
+            .summaries
+            .get(&self.baseline_id)
+            .ok_or(TorchError::Experiment {
+                op: "experiment_graph_engine.compare_run",
+                msg: "baseline summary missing".to_string(),
+            })?;
+        let candidate_summary = self
+            .summaries
+            .get(run_id)
+            .ok_or(TorchError::Experiment {
+                op: "experiment_graph_engine.compare_run",
+                msg: format!("candidate summary {run_id} not found"),
+            })?;
+        let baseline_snapshot = self
+            .snapshots
+            .get(&self.baseline_id)
+            .ok_or(TorchError::Experiment {
+                op: "experiment_graph_engine.compare_run",
+                msg: "baseline snapshot missing".to_string(),
+            })?;
+        let candidate_snapshot = self.snapshots.get(run_id).ok_or(TorchError::Experiment {
+            op: "experiment_graph_engine.compare_run",
+            msg: format!("candidate snapshot {run_id} missing"),
+        })?;
+
+        let mut report = build_run_delta_report_from_snapshots(
+            baseline_summary,
+            candidate_summary,
+            baseline_snapshot,
+            candidate_snapshot,
+            top_k,
+        );
+
+        if let Some(config) = gate_config {
+            report.regression_gate = Some(build_regression_gate_report(
+                &self.baseline_id,
+                run_id,
+                baseline_snapshot,
+                candidate_snapshot,
+                config,
+            )?);
+        }
+
+        Ok(report)
+    }
+
+    fn build_graph(&self) -> Result<RunComparisonGraph> {
+        let nodes = self.ordered_run_ids.clone();
+        let mut edges = Vec::new();
+        for i in 0..nodes.len() {
+            for j in (i + 1)..nodes.len() {
+                let from_id = &nodes[i];
+                let to_id = &nodes[j];
+                let from = self.snapshots.get(from_id);
+                let to = self.snapshots.get(to_id);
+                if let (Some(from_snapshot), Some(to_snapshot)) = (from, to) {
+                    let (edge_a, edge_b) =
+                        build_pairwise_edges_from_snapshots(from_snapshot, to_snapshot);
+                    edges.push(edge_a);
+                    edges.push(edge_b);
+                }
+            }
+        }
+        Ok(RunComparisonGraph { nodes, edges })
+    }
+}
+
+fn build_run_delta_report_from_snapshots(
+    _baseline: &RunSummary,
     candidate: &RunSummary,
-    aggregation: MetricAggregation,
+    baseline_snapshot: &MetricSnapshot,
+    candidate_snapshot: &MetricSnapshot,
     top_k: usize,
 ) -> RunDeltaReport {
     let mut deltas = Vec::new();
@@ -1408,11 +1644,9 @@ fn build_run_delta_report(
     let mut abs_sum = 0.0_f32;
     let mut sum = 0.0_f32;
     let mut compared = 0_usize;
-    for (metric, baseline_stats) in &baseline.metrics.metrics {
-        match candidate.metrics.metrics.get(metric) {
-            Some(candidate_stats) => {
-                let baseline_value = aggregation.value(baseline_stats);
-                let candidate_value = aggregation.value(candidate_stats);
+    for (metric, baseline_value) in &baseline_snapshot.values {
+        match candidate_snapshot.values.get(metric) {
+            Some(candidate_value) => {
                 let delta = candidate_value - baseline_value;
                 let delta_pct = if baseline_value.abs() > f32::EPSILON {
                     Some(delta / baseline_value * 100.0)
@@ -1421,8 +1655,8 @@ fn build_run_delta_report(
                 };
                 deltas.push(MetricDelta {
                     metric: metric.clone(),
-                    baseline: baseline_value,
-                    candidate: candidate_value,
+                    baseline: *baseline_value,
+                    candidate: *candidate_value,
                     delta,
                     delta_pct,
                 });
@@ -1455,42 +1689,20 @@ fn build_run_delta_report(
         top_deltas: top.into_sorted_vec_desc(),
         missing_metrics,
         summary: RunDeltaSummary {
-            total_metrics: baseline.metrics.metrics.len(),
+            total_metrics: baseline_snapshot.values.len(),
             compared_metrics: compared,
-            missing_metrics: baseline.metrics.metrics.len().saturating_sub(compared),
+            missing_metrics: baseline_snapshot.values.len().saturating_sub(compared),
             mean_abs_delta,
             mean_delta,
         },
         deltas,
+        regression_gate: None,
     }
 }
 
-fn build_comparison_graph(
-    summaries: &BTreeMap<String, RunSummary>,
-    aggregation: MetricAggregation,
-) -> RunComparisonGraph {
-    let nodes = summaries.keys().cloned().collect::<Vec<String>>();
-    let mut edges = Vec::new();
-    for i in 0..nodes.len() {
-        for j in (i + 1)..nodes.len() {
-            let from_id = &nodes[i];
-            let to_id = &nodes[j];
-            let from = summaries.get(from_id);
-            let to = summaries.get(to_id);
-            if let (Some(from_summary), Some(to_summary)) = (from, to) {
-                let (edge_a, edge_b) = build_pairwise_edges(from_summary, to_summary, aggregation);
-                edges.push(edge_a);
-                edges.push(edge_b);
-            }
-        }
-    }
-    RunComparisonGraph { nodes, edges }
-}
-
-fn build_pairwise_edges(
-    from: &RunSummary,
-    to: &RunSummary,
-    aggregation: MetricAggregation,
+fn build_pairwise_edges_from_snapshots(
+    from: &MetricSnapshot,
+    to: &MetricSnapshot,
 ) -> (ComparisonEdge, ComparisonEdge) {
     let mut compared_metrics = 0_usize;
     let mut wins = 0_usize;
@@ -1498,11 +1710,9 @@ fn build_pairwise_edges(
     let mut ties = 0_usize;
     let mut delta_sum = 0.0_f32;
 
-    for (metric, from_stats) in &from.metrics.metrics {
-        if let Some(to_stats) = to.metrics.metrics.get(metric) {
+    for (metric, from_value) in &from.values {
+        if let Some(to_value) = to.values.get(metric) {
             compared_metrics += 1;
-            let from_value = aggregation.value(from_stats);
-            let to_value = aggregation.value(to_stats);
             let directional_delta = match metric_direction(metric) {
                 MetricDirection::HigherBetter => from_value - to_value,
                 MetricDirection::LowerBetter => to_value - from_value,
@@ -1542,6 +1752,107 @@ fn build_pairwise_edges(
         mean_delta: -mean_delta,
     };
     (edge_a, edge_b)
+}
+
+fn build_regression_gate_report(
+    baseline_id: &str,
+    candidate_id: &str,
+    baseline_snapshot: &MetricSnapshot,
+    candidate_snapshot: &MetricSnapshot,
+    config: &RegressionGateConfig,
+) -> Result<RegressionGateReport> {
+    let mut findings = Vec::new();
+    for policy in &config.policies {
+        let baseline_value = baseline_snapshot.values.get(&policy.metric).copied();
+        let candidate_value = candidate_snapshot.values.get(&policy.metric).copied();
+        match (baseline_value, candidate_value) {
+            (Some(baseline), Some(candidate)) => {
+                let delta = candidate - baseline;
+                let delta_pct = if baseline.abs() > f32::EPSILON {
+                    Some(delta / baseline * 100.0)
+                } else {
+                    None
+                };
+                let directional_delta = match metric_direction(&policy.metric) {
+                    MetricDirection::HigherBetter => candidate - baseline,
+                    MetricDirection::LowerBetter => baseline - candidate,
+                };
+                if directional_delta < 0.0 {
+                    let regression_abs = directional_delta.abs();
+                    let regression_pct = if baseline.abs() > f32::EPSILON {
+                        Some(regression_abs / baseline.abs() * 100.0)
+                    } else {
+                        None
+                    };
+                    let mut violated = false;
+                    if let Some(max_abs) = policy.max_regression_abs {
+                        if regression_abs > max_abs {
+                            violated = true;
+                        }
+                    }
+                    if let Some(max_pct) = policy.max_regression_pct {
+                        if let Some(pct) = regression_pct {
+                            if pct > max_pct {
+                                violated = true;
+                            }
+                        }
+                    }
+                    if violated {
+                        findings.push(RegressionGateFinding {
+                            metric: policy.metric.clone(),
+                            baseline: Some(baseline),
+                            candidate: Some(candidate),
+                            delta: Some(delta),
+                            delta_pct,
+                            severity: policy.severity.clone(),
+                            message: format!(
+                                "regression detected (directional_delta={directional_delta:.4})"
+                            ),
+                        });
+                    }
+                }
+            }
+            _ => {
+                let severity = if config.allow_missing_metrics {
+                    RegressionSeverity::Minor
+                } else {
+                    policy.severity.clone()
+                };
+                findings.push(RegressionGateFinding {
+                    metric: policy.metric.clone(),
+                    baseline: baseline_value,
+                    candidate: candidate_value,
+                    delta: None,
+                    delta_pct: None,
+                    severity,
+                    message: "metric missing for regression gate".to_string(),
+                });
+            }
+        }
+    }
+
+    let mut status = if findings.iter().any(|finding| {
+        matches!(
+            finding.severity,
+            RegressionSeverity::Blocker | RegressionSeverity::Major
+        )
+    }) {
+        RegressionGateStatus::Fail
+    } else {
+        RegressionGateStatus::Pass
+    };
+
+    if config.warn_only {
+        status = RegressionGateStatus::Pass;
+    }
+
+    Ok(RegressionGateReport {
+        baseline_id: baseline_id.to_string(),
+        candidate_id: candidate_id.to_string(),
+        status,
+        findings,
+        evaluated_at_unix: now_unix_seconds()?,
+    })
 }
 
 fn build_validation_graph(config: &RunGovernanceConfig) -> Result<ValidationGraph> {

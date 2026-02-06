@@ -62,6 +62,8 @@ fn compare_runs_reports_deltas() {
         metric_aggregation: MetricAggregation::Last,
         top_k: 2,
         build_graph: true,
+        deterministic_seed: None,
+        regression_gate: None,
     };
     let report = store.compare_runs(&config).expect("compare");
     assert_eq!(report.baseline_id, baseline_id);
@@ -110,6 +112,8 @@ fn compare_runs_is_thread_safe_under_stress() {
         metric_aggregation: MetricAggregation::Mean,
         top_k: 3,
         build_graph: false,
+        deterministic_seed: Some(99),
+        regression_gate: None,
     };
 
     let mut handles = Vec::new();
