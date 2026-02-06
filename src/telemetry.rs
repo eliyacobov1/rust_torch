@@ -35,6 +35,137 @@ impl TelemetryEvent {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryStats {
+    pub count: u64,
+    pub mean_duration_ms: f64,
+    pub p95_duration_ms: f64,
+    pub max_duration_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetrySummary {
+    pub total_events: u64,
+    pub events: BTreeMap<String, TelemetryStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TelemetryBudgetStatus {
+    Pass,
+    Fail,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryBudgetViolation {
+    pub event_name: Option<String>,
+    pub metric: String,
+    pub expected: String,
+    pub actual: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryBudgetReport {
+    pub status: TelemetryBudgetStatus,
+    pub violations: Vec<TelemetryBudgetViolation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryBudgetThreshold {
+    pub max_mean_duration_ms: Option<f64>,
+    pub max_p95_duration_ms: Option<f64>,
+    pub max_max_duration_ms: Option<f64>,
+    pub max_event_count: Option<u64>,
+}
+
+impl TelemetryBudgetThreshold {
+    fn evaluate(
+        &self,
+        event_name: Option<&str>,
+        stats: &TelemetryStats,
+        violations: &mut Vec<TelemetryBudgetViolation>,
+    ) {
+        if let Some(limit) = self.max_mean_duration_ms {
+            if stats.mean_duration_ms > limit {
+                violations.push(TelemetryBudgetViolation {
+                    event_name: event_name.map(str::to_string),
+                    metric: "mean_duration_ms".to_string(),
+                    expected: format!("<= {limit}"),
+                    actual: format!("{}", stats.mean_duration_ms),
+                });
+            }
+        }
+        if let Some(limit) = self.max_p95_duration_ms {
+            if stats.p95_duration_ms > limit {
+                violations.push(TelemetryBudgetViolation {
+                    event_name: event_name.map(str::to_string),
+                    metric: "p95_duration_ms".to_string(),
+                    expected: format!("<= {limit}"),
+                    actual: format!("{}", stats.p95_duration_ms),
+                });
+            }
+        }
+        if let Some(limit) = self.max_max_duration_ms {
+            if stats.max_duration_ms > limit {
+                violations.push(TelemetryBudgetViolation {
+                    event_name: event_name.map(str::to_string),
+                    metric: "max_duration_ms".to_string(),
+                    expected: format!("<= {limit}"),
+                    actual: format!("{}", stats.max_duration_ms),
+                });
+            }
+        }
+        if let Some(limit) = self.max_event_count {
+            if stats.count > limit {
+                violations.push(TelemetryBudgetViolation {
+                    event_name: event_name.map(str::to_string),
+                    metric: "event_count".to_string(),
+                    expected: format!("<= {limit}"),
+                    actual: format!("{}", stats.count),
+                });
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryBudget {
+    pub max_total_events: Option<u64>,
+    pub global: TelemetryBudgetThreshold,
+    pub per_event: BTreeMap<String, TelemetryBudgetThreshold>,
+}
+
+impl TelemetryBudget {
+    pub fn evaluate(&self, summary: &TelemetrySummary) -> Result<TelemetryBudgetReport> {
+        let mut violations = Vec::new();
+        if let Some(limit) = self.max_total_events {
+            if summary.total_events > limit {
+                violations.push(TelemetryBudgetViolation {
+                    event_name: None,
+                    metric: "total_events".to_string(),
+                    expected: format!("<= {limit}"),
+                    actual: format!("{}", summary.total_events),
+                });
+            }
+        }
+
+        for (event_name, stats) in &summary.events {
+            self.global
+                .evaluate(Some(event_name.as_str()), stats, &mut violations);
+            if let Some(threshold) = self.per_event.get(event_name) {
+                threshold.evaluate(Some(event_name.as_str()), stats, &mut violations);
+            }
+        }
+
+        let status = if violations.is_empty() {
+            TelemetryBudgetStatus::Pass
+        } else {
+            TelemetryBudgetStatus::Fail
+        };
+
+        Ok(TelemetryBudgetReport { status, violations })
+    }
+}
+
 pub trait TelemetrySink: Send + Sync + 'static {
     fn record(&self, event: TelemetryEvent) -> Result<()>;
 }

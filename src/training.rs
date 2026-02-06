@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use blake3::hash;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -10,6 +11,10 @@ use crate::autograd;
 use crate::data::{ClassificationDataset, TensorDataset};
 use crate::error::{Result, TorchError};
 use crate::experiment::{ExperimentStore, MetricsLoggerConfig};
+use crate::governance::{
+    GovernanceAction, GovernanceGraph, GovernanceLedger, GovernanceLedgerEvent, GovernancePlan,
+    GovernancePlanEntry, GovernancePlanner, GovernanceReplayCursor,
+};
 use crate::models::{LinearRegression, MlpClassifier};
 use crate::ops;
 use crate::optim::{Optimizer, Sgd};
@@ -101,6 +106,12 @@ pub struct Trainer {
     config: TrainerConfig,
 }
 
+#[derive(Debug)]
+struct TrainingGovernance {
+    cursor: GovernanceReplayCursor,
+    ledger: GovernanceLedger,
+}
+
 impl Trainer {
     /// Create a new trainer bound to a persistence store.
     pub fn new(store: ExperimentStore, config: TrainerConfig) -> Result<Self> {
@@ -125,7 +136,9 @@ impl Trainer {
             self.config.to_json(),
             self.config.tags.clone(),
         )?;
-        match self.train_inner(model, dataset, &mut run) {
+        let mut governance =
+            prepare_training_governance(&run, self.config.epochs, self.config.checkpoint_every)?;
+        match self.train_inner(model, dataset, &mut run, &mut governance) {
             Ok(report) => {
                 run.mark_completed()?;
                 run.write_summary(Some(start.elapsed()))?;
@@ -146,7 +159,17 @@ impl Trainer {
         model: &mut LinearRegression,
         dataset: &TensorDataset,
         run: &mut crate::experiment::RunHandle,
+        governance: &mut TrainingGovernance,
     ) -> Result<TrainingReport> {
+        let run_id = run.metadata().id.clone();
+        let init_stage_id = format!("{run_id}:init");
+        let init_entry = governance.cursor.expect_stage(&init_stage_id)?;
+        record_governance_event(
+            &mut governance.ledger,
+            &init_entry,
+            GovernanceAction::Started,
+            "trainer_init_started",
+        )?;
         let telemetry = match jsonl_recorder_from_env("RUSTORCH_RUN_TELEMETRY") {
             Ok(Some(recorder)) => Some(Arc::new(recorder)),
             Ok(None) => match run.create_telemetry_recorder() {
@@ -168,7 +191,22 @@ impl Trainer {
         let mut final_loss = f32::MAX;
         let mut total_steps = 0usize;
 
+        record_governance_event(
+            &mut governance.ledger,
+            &init_entry,
+            GovernanceAction::Completed,
+            "trainer_init_completed",
+        )?;
+
         for epoch in 0..self.config.epochs {
+            let epoch_stage_id = format!("{run_id}:epoch-{epoch}");
+            let epoch_entry = governance.cursor.expect_stage(&epoch_stage_id)?;
+            record_governance_event(
+                &mut governance.ledger,
+                &epoch_entry,
+                GovernanceAction::Started,
+                "epoch_started",
+            )?;
             let mut epoch_loss = 0.0f32;
             let mut batches = 0usize;
             let mut batch_iter = dataset.batch_iter(self.config.batch_size)?;
@@ -231,14 +269,51 @@ impl Trainer {
 
             if self.config.checkpoint_every > 0 && (epoch + 1) % self.config.checkpoint_every == 0 {
                 let checkpoint_name = format!("epoch_{epoch}");
+                let checkpoint_stage_id = format!("{run_id}:checkpoint-{epoch}");
+                let checkpoint_entry = governance.cursor.expect_stage(&checkpoint_stage_id)?;
+                record_governance_event(
+                    &mut governance.ledger,
+                    &checkpoint_entry,
+                    GovernanceAction::Started,
+                    "checkpoint_started",
+                )?;
                 run.save_checkpoint(&checkpoint_name, &model.state_dict())?;
+                record_governance_event(
+                    &mut governance.ledger,
+                    &checkpoint_entry,
+                    GovernanceAction::Completed,
+                    "checkpoint_completed",
+                )?;
             }
+
+            record_governance_event(
+                &mut governance.ledger,
+                &epoch_entry,
+                GovernanceAction::Completed,
+                "epoch_completed",
+            )?;
         }
+
+        let finalize_stage_id = format!("{run_id}:finalize");
+        let finalize_entry = governance.cursor.expect_stage(&finalize_stage_id)?;
+        record_governance_event(
+            &mut governance.ledger,
+            &finalize_entry,
+            GovernanceAction::Started,
+            "finalize_started",
+        )?;
 
         if best_loss == f32::MAX {
             warn!("Training completed without recording loss values");
         }
         metrics_logger.flush()?;
+
+        record_governance_event(
+            &mut governance.ledger,
+            &finalize_entry,
+            GovernanceAction::Completed,
+            "finalize_completed",
+        )?;
 
         Ok(TrainingReport {
             run_id: run.metadata().id.clone(),
@@ -280,7 +355,9 @@ impl ClassificationTrainer {
             self.config.to_json(),
             self.config.tags.clone(),
         )?;
-        match self.train_inner(model, dataset, &mut run) {
+        let mut governance =
+            prepare_training_governance(&run, self.config.epochs, self.config.checkpoint_every)?;
+        match self.train_inner(model, dataset, &mut run, &mut governance) {
             Ok(report) => {
                 run.mark_completed()?;
                 run.write_summary(Some(start.elapsed()))?;
@@ -301,7 +378,17 @@ impl ClassificationTrainer {
         model: &mut MlpClassifier,
         dataset: &ClassificationDataset,
         run: &mut crate::experiment::RunHandle,
+        governance: &mut TrainingGovernance,
     ) -> Result<ClassificationReport> {
+        let run_id = run.metadata().id.clone();
+        let init_stage_id = format!("{run_id}:init");
+        let init_entry = governance.cursor.expect_stage(&init_stage_id)?;
+        record_governance_event(
+            &mut governance.ledger,
+            &init_entry,
+            GovernanceAction::Started,
+            "classification_init_started",
+        )?;
         let telemetry = match jsonl_recorder_from_env("RUSTORCH_RUN_TELEMETRY") {
             Ok(Some(recorder)) => Some(Arc::new(recorder)),
             Ok(None) => match run.create_telemetry_recorder() {
@@ -325,7 +412,22 @@ impl ClassificationTrainer {
         let mut final_accuracy = 0.0f32;
         let mut total_steps = 0usize;
 
+        record_governance_event(
+            &mut governance.ledger,
+            &init_entry,
+            GovernanceAction::Completed,
+            "classification_init_completed",
+        )?;
+
         for epoch in 0..self.config.epochs {
+            let epoch_stage_id = format!("{run_id}:epoch-{epoch}");
+            let epoch_entry = governance.cursor.expect_stage(&epoch_stage_id)?;
+            record_governance_event(
+                &mut governance.ledger,
+                &epoch_entry,
+                GovernanceAction::Started,
+                "classification_epoch_started",
+            )?;
             let mut epoch_loss = 0.0f32;
             let mut epoch_accuracy = 0.0f32;
             let mut batches = 0usize;
@@ -411,14 +513,51 @@ impl ClassificationTrainer {
 
             if self.config.checkpoint_every > 0 && (epoch + 1) % self.config.checkpoint_every == 0 {
                 let checkpoint_name = format!("epoch_{epoch}");
+                let checkpoint_stage_id = format!("{run_id}:checkpoint-{epoch}");
+                let checkpoint_entry = governance.cursor.expect_stage(&checkpoint_stage_id)?;
+                record_governance_event(
+                    &mut governance.ledger,
+                    &checkpoint_entry,
+                    GovernanceAction::Started,
+                    "classification_checkpoint_started",
+                )?;
                 run.save_checkpoint(&checkpoint_name, &model.state_dict())?;
+                record_governance_event(
+                    &mut governance.ledger,
+                    &checkpoint_entry,
+                    GovernanceAction::Completed,
+                    "classification_checkpoint_completed",
+                )?;
             }
+
+            record_governance_event(
+                &mut governance.ledger,
+                &epoch_entry,
+                GovernanceAction::Completed,
+                "classification_epoch_completed",
+            )?;
         }
+
+        let finalize_stage_id = format!("{run_id}:finalize");
+        let finalize_entry = governance.cursor.expect_stage(&finalize_stage_id)?;
+        record_governance_event(
+            &mut governance.ledger,
+            &finalize_entry,
+            GovernanceAction::Started,
+            "classification_finalize_started",
+        )?;
 
         if best_loss == f32::MAX {
             warn!("Training completed without recording loss values");
         }
         metrics_logger.flush()?;
+
+        record_governance_event(
+            &mut governance.ledger,
+            &finalize_entry,
+            GovernanceAction::Completed,
+            "classification_finalize_completed",
+        )?;
 
         Ok(ClassificationReport {
             run_id: run.metadata().id.clone(),
@@ -474,4 +613,69 @@ fn batch_accuracy(log_probs: &Tensor, targets: &Tensor) -> Result<f32> {
         }
     }
     Ok(correct as f32 / batch as f32)
+}
+
+fn prepare_training_governance(
+    run: &crate::experiment::RunHandle,
+    epochs: usize,
+    checkpoint_every: usize,
+) -> Result<TrainingGovernance> {
+    let plan = build_training_governance_plan(&run.metadata().id, epochs, checkpoint_every)?;
+    run.write_governance_plan(&plan)?;
+    let ledger = run.create_governance_ledger()?;
+    Ok(TrainingGovernance {
+        cursor: GovernanceReplayCursor::new(plan),
+        ledger,
+    })
+}
+
+fn build_training_governance_plan(
+    run_id: &str,
+    epochs: usize,
+    checkpoint_every: usize,
+) -> Result<GovernancePlan> {
+    let seed = seed_from_run_id(run_id);
+    let mut graph = GovernanceGraph::new();
+    let init_stage_id = graph.add_stage(run_id.to_string(), "init", Vec::new())?;
+    let mut previous = init_stage_id;
+    for epoch in 0..epochs {
+        let epoch_stage = format!("epoch-{epoch}");
+        let epoch_id = graph.add_stage(run_id.to_string(), &epoch_stage, vec![previous.clone()])?;
+        previous = epoch_id;
+        if checkpoint_every > 0 && (epoch + 1) % checkpoint_every == 0 {
+            let checkpoint_stage = format!("checkpoint-{epoch}");
+            let checkpoint_id =
+                graph.add_stage(run_id.to_string(), &checkpoint_stage, vec![previous.clone()])?;
+            previous = checkpoint_id;
+        }
+    }
+    graph.add_stage(run_id.to_string(), "finalize", vec![previous])?;
+    GovernancePlanner::new(seed, graph).plan()
+}
+
+fn seed_from_run_id(run_id: &str) -> u64 {
+    let hash = hash(run_id.as_bytes());
+    let bytes = hash.as_bytes();
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&bytes[0..8]);
+    u64::from_le_bytes(buf)
+}
+
+fn record_governance_event(
+    ledger: &mut GovernanceLedger,
+    entry: &GovernancePlanEntry,
+    action: GovernanceAction,
+    message: &str,
+) -> Result<()> {
+    ledger
+        .record(GovernanceLedgerEvent::new(
+            entry.stage_id.clone(),
+            entry.run_id.clone(),
+            entry.stage.clone(),
+            action,
+            message.to_string(),
+            entry.wave,
+            entry.lane,
+        ))
+        .map(|_| ())
 }

@@ -18,9 +18,9 @@ pub mod training;
 pub mod py;
 
 pub use audit::{
-    verify_audit_log, AuditChainIssue, AuditChainIssueKind, AuditEvent, AuditLog, AuditProof,
-    AuditProofDirection, AuditScope, AuditStatus, AuditVerificationConfig, AuditVerificationReport,
-    AuditVerificationStatus, MerkleAccumulator,
+    record_governance_plan, verify_audit_log, AuditChainIssue, AuditChainIssueKind, AuditEvent,
+    AuditLog, AuditProof, AuditProofDirection, AuditScope, AuditStatus, AuditVerificationConfig,
+    AuditVerificationReport, AuditVerificationStatus, MerkleAccumulator,
 };
 pub use checkpoint::{load_state_dict, save_state_dict, StateDict};
 pub use data::{
@@ -37,15 +37,21 @@ pub use experiment::{
     RunGovernanceConfig, RunGovernanceReport, RunGovernanceSummary, RunHandle, RunMetadata,
     RunOverview, RunRemediationReport, RunRemediationTicket, RunStatus, RunSummary,
     RunValidationCategory, RunValidationFinding, RunValidationLevel, RunValidationResult,
-    RunValidationStatus, TelemetryStats, TelemetrySummary,
+    RunValidationStatus,
 };
 pub use governance::{
     build_governance_schedule, deterministic_run_order, DeterministicScheduler,
-    GovernanceSchedule, GovernanceScheduleEntry,
+    GovernanceAction, GovernanceGraph, GovernanceLedger, GovernanceLedgerEvent, GovernancePlan,
+    GovernancePlanEntry, GovernancePlanner, GovernanceReplayCursor, GovernanceSchedule,
+    GovernanceScheduleEntry,
 };
 pub use models::{LinearRegression, MlpClassifier};
 pub use optim::{Optimizer, Sgd};
 pub use training::{
     ClassificationReport, ClassificationTrainer, ClassificationTrainerConfig, Trainer,
     TrainerConfig, TrainingReport,
+};
+pub use telemetry::{
+    TelemetryBudget, TelemetryBudgetReport, TelemetryBudgetStatus, TelemetryEvent, TelemetryStats,
+    TelemetrySummary,
 };

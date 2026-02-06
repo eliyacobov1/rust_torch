@@ -8,6 +8,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, TorchError};
+use crate::governance::GovernancePlan;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AuditScope {
@@ -209,6 +210,57 @@ impl AuditLog {
     pub fn leaves(&self) -> &[Hash] {
         self.merkle.leaves()
     }
+}
+
+#[derive(Debug, Serialize)]
+struct GovernancePlanAuditPayload<'a> {
+    seed: u64,
+    generated_at_unix: u64,
+    total_waves: usize,
+    total_stages: usize,
+    entries: Vec<GovernancePlanAuditEntry<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct GovernancePlanAuditEntry<'a> {
+    stage_id: &'a str,
+    run_id: &'a str,
+    stage: &'a str,
+    wave: usize,
+    lane: usize,
+}
+
+pub fn record_governance_plan(audit_log: &mut AuditLog, plan: &GovernancePlan) -> Result<AuditEvent> {
+    let entries = plan
+        .entries
+        .iter()
+        .map(|entry| GovernancePlanAuditEntry {
+            stage_id: entry.stage_id.as_str(),
+            run_id: entry.run_id.as_str(),
+            stage: entry.stage.as_str(),
+            wave: entry.wave,
+            lane: entry.lane,
+        })
+        .collect();
+    let payload = GovernancePlanAuditPayload {
+        seed: plan.seed,
+        generated_at_unix: plan.generated_at_unix,
+        total_waves: plan.total_waves,
+        total_stages: plan.total_stages,
+        entries,
+    };
+    let message = serde_json::to_string(&payload).map_err(|err| TorchError::Experiment {
+        op: "audit_log.record_governance_plan",
+        msg: format!("failed to serialize governance plan: {err}"),
+    })?;
+    audit_log.record(AuditEvent::new(
+        AuditScope::Store,
+        None,
+        Some("governance.plan".to_string()),
+        AuditStatus::Completed,
+        message,
+        0,
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

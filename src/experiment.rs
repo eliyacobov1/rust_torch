@@ -15,13 +15,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::audit::{
-    verify_audit_log, AuditEvent, AuditLog, AuditScope, AuditStatus, AuditVerificationConfig,
-    AuditVerificationReport,
+    record_governance_plan, verify_audit_log, AuditEvent, AuditLog, AuditScope, AuditStatus,
+    AuditVerificationConfig, AuditVerificationReport,
 };
 use crate::checkpoint::{save_state_dict, StateDict};
 use crate::error::{Result, TorchError};
-use crate::governance::{build_governance_schedule, deterministic_run_order, GovernanceScheduleEntry};
-use crate::telemetry::{JsonlSink, TelemetryEvent, TelemetryRecorder};
+use crate::governance::{
+    build_governance_schedule, deterministic_run_order, GovernanceGraph, GovernanceLedger,
+    GovernancePlan, GovernancePlanner, GovernanceScheduleEntry,
+};
+use crate::telemetry::{
+    JsonlSink, TelemetryBudget, TelemetryBudgetReport, TelemetryBudgetStatus, TelemetryEvent,
+    TelemetryRecorder, TelemetryStats, TelemetrySummary,
+};
 use crate::tensor::{layout_stats, reset_layout_stats};
 
 const MIN_RUN_SCHEMA_VERSION: u32 = 1;
@@ -82,22 +88,6 @@ pub struct MetricsSummary {
     pub first_timestamp_unix: Option<u64>,
     pub last_timestamp_unix: Option<u64>,
     pub metrics: BTreeMap<String, MetricStats>,
-}
-
-/// Aggregate statistics for telemetry events of a given name.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TelemetryStats {
-    pub count: u64,
-    pub mean_duration_ms: f64,
-    pub p95_duration_ms: f64,
-    pub max_duration_ms: f64,
-}
-
-/// Rollup summary for telemetry events recorded during a run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TelemetrySummary {
-    pub total_events: u64,
-    pub events: BTreeMap<String, TelemetryStats>,
 }
 
 /// Rollup summary for tensor layout validation telemetry.
@@ -386,6 +376,7 @@ pub enum RunValidationCategory {
     Summary,
     Metrics,
     Telemetry,
+    TelemetryBudget,
     Artifacts,
     Schema,
     OrphanedFiles,
@@ -496,6 +487,7 @@ pub struct RunGovernanceConfig {
     pub include_orphaned_files: bool,
     pub check_metrics: bool,
     pub check_telemetry: bool,
+    pub telemetry_budget: Option<TelemetryBudget>,
     pub audit_log: bool,
     pub audit_log_path: Option<PathBuf>,
     pub audit_verify: bool,
@@ -519,6 +511,7 @@ impl Default for RunGovernanceConfig {
             include_orphaned_files: true,
             check_metrics: true,
             check_telemetry: true,
+            telemetry_budget: None,
             audit_log: false,
             audit_log_path: None,
             audit_verify: true,
@@ -835,6 +828,17 @@ impl ExperimentStore {
             .deterministic_seed
             .unwrap_or_else(|| derive_schedule_seed(&run_dirs));
         let schedule_entries = build_governance_schedule(schedule_seed, run_dirs.clone())?;
+        let governance_plan = build_validation_plan(schedule_seed, &schedule_entries)?;
+        if let Some(audit_log) = audit_log.as_ref() {
+            match audit_log.lock() {
+                Ok(mut guard) => {
+                    if let Err(err) = record_governance_plan(&mut guard, &governance_plan) {
+                        warn!("failed to record governance plan: {err}");
+                    }
+                }
+                Err(_) => warn!("audit log lock poisoned while recording governance plan"),
+            }
+        }
         let scheduled_dirs = schedule_entries
             .iter()
             .map(|entry| entry.run_dir.clone())
@@ -1180,6 +1184,29 @@ impl RunHandle {
                 op: "run_handle.create_telemetry_recorder",
                 msg: format!("failed to create telemetry sink {}: {err}", path.display()),
             })
+    }
+
+    /// Create a governance ledger for deterministic replay tracking.
+    pub fn create_governance_ledger(&self) -> Result<GovernanceLedger> {
+        let path = self.run_dir().join("governance_ledger.jsonl");
+        GovernanceLedger::open(&path).map_err(|err| TorchError::Experiment {
+            op: "run_handle.create_governance_ledger",
+            msg: format!("failed to create governance ledger {}: {err}", path.display()),
+        })
+    }
+
+    /// Persist a governance plan for deterministic replay.
+    pub fn write_governance_plan(&self, plan: &GovernancePlan) -> Result<PathBuf> {
+        let path = self.run_dir().join("governance_plan.json");
+        let payload = serde_json::to_string_pretty(plan).map_err(|err| TorchError::Experiment {
+            op: "run_handle.write_governance_plan",
+            msg: format!("failed to serialize governance plan: {err}"),
+        })?;
+        fs::write(&path, payload).map_err(|err| TorchError::Experiment {
+            op: "run_handle.write_governance_plan",
+            msg: format!("failed to write governance plan {}: {err}", path.display()),
+        })?;
+        Ok(path)
     }
 
     /// Record an artifact entry in the run metadata directory.
@@ -2062,6 +2089,28 @@ fn validate_run_dir(
                             });
                         }
                         summary = value;
+                        if config.check_telemetry {
+                            if let (Some(summary_value), Some(budget)) =
+                                (summary.as_ref(), config.telemetry_budget.as_ref())
+                            {
+                                if let Some(telemetry) = &summary_value.telemetry {
+                                    match budget.evaluate(telemetry) {
+                                        Ok(report) => {
+                                            if report.status == TelemetryBudgetStatus::Fail {
+                                                findings.extend(telemetry_budget_findings(&report));
+                                            }
+                                        }
+                                        Err(err) => findings.push(RunValidationFinding {
+                                            level: RunValidationLevel::Warning,
+                                            category: RunValidationCategory::TelemetryBudget,
+                                            message: format!(
+                                                "telemetry budget evaluation failed: {err}"
+                                            ),
+                                        }),
+                                    }
+                                }
+                            }
+                        }
                     }
                     Err(err) => {
                         findings.push(RunValidationFinding {
@@ -2427,6 +2476,21 @@ fn derive_schedule_seed(run_dirs: &[PathBuf]) -> u64 {
     u64::from_le_bytes(buf)
 }
 
+fn build_validation_plan(
+    seed: u64,
+    schedule_entries: &[GovernanceScheduleEntry],
+) -> Result<GovernancePlan> {
+    let mut graph = GovernanceGraph::new();
+    let mut previous: Option<String> = None;
+    for entry in schedule_entries {
+        let stage_id = format!("{}:validate", entry.run_id);
+        let deps = previous.iter().cloned().collect::<Vec<_>>();
+        graph.add_stage_with_id(stage_id.clone(), entry.run_id.clone(), "validate", deps)?;
+        previous = Some(stage_id);
+    }
+    GovernancePlanner::new(seed, graph).plan()
+}
+
 fn remediation_severity(result: &RunValidationResult) -> RemediationSeverity {
     if result.quarantined {
         return RemediationSeverity::High;
@@ -2485,6 +2549,12 @@ fn remediation_actions(findings: &[RunValidationFinding], quarantined: bool) -> 
             }
             RunValidationCategory::Telemetry => {
                 actions.insert("Re-export telemetry.jsonl with valid JSONL payloads.".to_string());
+            }
+            RunValidationCategory::TelemetryBudget => {
+                actions.insert(
+                    "Adjust telemetry budgets or optimize slow stages to meet thresholds."
+                        .to_string(),
+                );
             }
             RunValidationCategory::Artifacts => {
                 actions.insert(
@@ -2998,6 +3068,28 @@ fn validate_telemetry_summary(telemetry: &TelemetrySummary) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn telemetry_budget_findings(report: &TelemetryBudgetReport) -> Vec<RunValidationFinding> {
+    report
+        .violations
+        .iter()
+        .map(|violation| {
+            let scope = violation
+                .event_name
+                .as_deref()
+                .map(|name| format!("event {name}"))
+                .unwrap_or_else(|| "global".to_string());
+            RunValidationFinding {
+                level: RunValidationLevel::Error,
+                category: RunValidationCategory::TelemetryBudget,
+                message: format!(
+                    "telemetry budget violation ({scope}): {} expected {}, observed {}",
+                    violation.metric, violation.expected, violation.actual
+                ),
+            }
+        })
+        .collect()
 }
 
 fn validate_layout_summary(layout: &LayoutSummary) -> Result<()> {
