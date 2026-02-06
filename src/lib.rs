@@ -4,6 +4,7 @@ pub mod autograd;
 pub mod checkpoint;
 pub mod data;
 pub mod error;
+pub mod execution;
 pub mod experiment;
 pub mod governance;
 pub mod models;
@@ -18,9 +19,10 @@ pub mod training;
 pub mod py;
 
 pub use audit::{
-    record_governance_plan, verify_audit_log, AuditChainIssue, AuditChainIssueKind, AuditEvent,
-    AuditLog, AuditProof, AuditProofDirection, AuditScope, AuditStatus, AuditVerificationConfig,
-    AuditVerificationReport, AuditVerificationStatus, MerkleAccumulator,
+    record_execution_plan, record_governance_plan, verify_audit_log, AuditChainIssue,
+    AuditChainIssueKind, AuditEvent, AuditLog, AuditProof, AuditProofDirection, AuditScope,
+    AuditStatus, AuditVerificationConfig, AuditVerificationReport, AuditVerificationStatus,
+    MerkleAccumulator,
 };
 pub use checkpoint::{load_state_dict, save_state_dict, StateDict};
 pub use data::{
@@ -38,6 +40,12 @@ pub use experiment::{
     RunOverview, RunRemediationReport, RunRemediationTicket, RunStatus, RunSummary,
     RunValidationCategory, RunValidationFinding, RunValidationLevel, RunValidationResult,
     RunValidationStatus,
+};
+pub use execution::{
+    ExecutionAction, ExecutionCostProfile, ExecutionEngine, ExecutionGraph, ExecutionLedger,
+    ExecutionLedgerEvent, ExecutionPlan, ExecutionPlanEntry, ExecutionPlanner, ExecutionRegistry,
+    ExecutionRunReport, ExecutionRunStatus, ExecutionStage, ExecutionStageReport, ExecutionStatus,
+    ExecutionTask,
 };
 pub use governance::{
     build_governance_schedule, deterministic_run_order, DeterministicScheduler,

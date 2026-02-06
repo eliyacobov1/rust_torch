@@ -197,6 +197,17 @@ pub struct GovernancePlan {
     pub total_stages: usize,
 }
 
+impl GovernancePlan {
+    pub fn total_lanes(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|entry| entry.lane)
+            .max()
+            .map(|lane| lane.saturating_add(1))
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GovernancePlanner {
     seed: u64,

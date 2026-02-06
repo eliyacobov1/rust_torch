@@ -8,6 +8,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, TorchError};
+use crate::execution::ExecutionPlan;
 use crate::governance::GovernancePlan;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -257,6 +258,63 @@ pub fn record_governance_plan(audit_log: &mut AuditLog, plan: &GovernancePlan) -
         AuditScope::Store,
         None,
         Some("governance.plan".to_string()),
+        AuditStatus::Completed,
+        message,
+        0,
+    ))
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutionPlanAuditPayload<'a> {
+    seed: u64,
+    generated_at_unix: u64,
+    total_lanes: usize,
+    total_stages: usize,
+    makespan_ticks: u64,
+    entries: Vec<ExecutionPlanAuditEntry<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutionPlanAuditEntry<'a> {
+    stage_id: &'a str,
+    run_id: &'a str,
+    stage: &'a str,
+    lane: usize,
+    start_tick: u64,
+    end_tick: u64,
+    cost: u64,
+}
+
+pub fn record_execution_plan(audit_log: &mut AuditLog, plan: &ExecutionPlan) -> Result<AuditEvent> {
+    let entries = plan
+        .entries
+        .iter()
+        .map(|entry| ExecutionPlanAuditEntry {
+            stage_id: entry.stage_id.as_str(),
+            run_id: entry.run_id.as_str(),
+            stage: entry.stage.as_str(),
+            lane: entry.lane,
+            start_tick: entry.start_tick,
+            end_tick: entry.end_tick,
+            cost: entry.cost,
+        })
+        .collect();
+    let payload = ExecutionPlanAuditPayload {
+        seed: plan.seed,
+        generated_at_unix: plan.generated_at_unix,
+        total_lanes: plan.total_lanes,
+        total_stages: plan.total_stages,
+        makespan_ticks: plan.makespan_ticks,
+        entries,
+    };
+    let message = serde_json::to_string(&payload).map_err(|err| TorchError::Experiment {
+        op: "audit_log.record_execution_plan",
+        msg: format!("failed to serialize execution plan: {err}"),
+    })?;
+    audit_log.record(AuditEvent::new(
+        AuditScope::Store,
+        None,
+        Some("execution.plan".to_string()),
         AuditStatus::Completed,
         message,
         0,
