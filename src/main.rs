@@ -4,8 +4,9 @@ use rustorch::api::RustorchService;
 use rustorch::audit::{verify_audit_log, AuditVerificationConfig};
 use rustorch::data::{SyntheticClassificationConfig, SyntheticRegressionConfig};
 use rustorch::experiment::{
-    CsvExportReport, ExperimentStore, MetricAggregation, RunComparisonConfig, RunComparisonReport,
-    RunFilter, RunGovernanceConfig, RunGovernanceReport, RunStatus,
+    CsvExportReport, ExperimentStore, MetricAggregation, RegressionGateConfig, RegressionPolicy,
+    RegressionSeverity, RunComparisonConfig, RunComparisonReport, RunFilter, RunGovernanceConfig,
+    RunGovernanceReport, RunStatus,
 };
 use rustorch::training::{ClassificationTrainerConfig, TrainerConfig};
 use rustorch::{Result, TorchError};
@@ -148,7 +149,7 @@ fn run_train_mlp(args: &[String]) -> Result<()> {
 
 fn print_usage() {
     println!(
-        "rustorch_cli\n\nUSAGE:\n  rustorch_cli train-linear [options]\n  rustorch_cli train-mlp [options]\n  rustorch_cli runs-list [options]\n  rustorch_cli runs-summary [options]\n  rustorch_cli runs-export-csv [options]\n  rustorch_cli runs-compare [options]\n  rustorch_cli runs-validate [options]\n  rustorch_cli audit-verify [options]\n\nOPTIONS (shared):\n  --runs-dir <path>        Directory for experiment runs (default: runs)\n  --samples <n>            Number of samples (default: 128)\n  --features <n>           Number of input features (default: 4)\n  --epochs <n>             Training epochs (default: 10)\n  --batch-size <n>         Batch size (default: 16)\n  --lr <f>                 Learning rate (default: 1e-2)\n  --weight-decay <f>       Weight decay (default: 0)\n  --seed <n>               RNG seed (default: 42)\n  --run-name <name>        Run name label\n  --log-every <n>          Log metrics every n steps (default: 10)\n  --checkpoint-every <n>   Save checkpoint every n epochs (default: 1)\n\nOPTIONS (runs-list):\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-summary):\n  --run-id <id>            Run identifier to summarize\n\nOPTIONS (runs-export-csv):\n  --output <path>          Output CSV path (default: runs_summary.csv)\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-compare):\n  --run-ids <csv>          Explicit run IDs to compare\n  --baseline-id <id>       Run ID to use as baseline (default: first in set)\n  --metric-agg <name>      Aggregation: min|max|mean|p50|p95|last (default: last)\n  --top-k <n>              Top deltas to print per run (default: 5)\n  --format <name>          Output format: table|json (default: table)\n  --no-graph               Skip pairwise comparison graph\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-validate):\n  --workers <n>             Number of validation workers\n  --schedule-seed <n>       Deterministic scheduler seed for governance validation\n  --quarantine              Move invalid runs into quarantine\n  --quarantine-dir <path>   Quarantine directory override\n  --output <path>           Write JSON report to path\n  --lenient                 Downgrade schema errors to warnings where possible\n  --no-orphaned             Skip orphaned file detection\n  --no-metrics              Skip metrics.jsonl validation\n  --no-telemetry            Skip telemetry.jsonl validation\n  --audit                   Enable governance audit logging\n  --audit-log <path>        Audit log path override\n  --audit-verify            Verify audit log integrity after validation\n  --no-audit-verify         Skip audit log verification\n  --audit-expected-root <h> Expected Merkle root for audit verification\n  --audit-proofs            Include Merkle proofs in audit verification output\n  --audit-proof-samples <n> Max number of audit proofs to include\n  --no-remediation          Skip remediation ticket generation\n\nOPTIONS (audit-verify):\n  --audit-log <path>        Audit log path to verify\n  --expected-root <hash>    Expected Merkle root to verify against\n  --proofs                  Include Merkle proofs in the output\n  --max-proofs <n>          Maximum proofs to include (default: 5)\n  --output <path>           Write JSON report to path\n\nOPTIONS (train-linear):\n  --targets <n>            Number of output targets (default: 1)\n  --noise <f>              Noise stddev for synthetic data (default: 0.05)\n\nOPTIONS (train-mlp):\n  --classes <n>            Number of classes (default: 3)\n  --hidden <n>             Hidden layer size (default: 16)\n  --cluster-std <f>        Cluster stddev for synthetic data (default: 0.35)\n  -h, --help               Print this help text\n"
+        "rustorch_cli\n\nUSAGE:\n  rustorch_cli train-linear [options]\n  rustorch_cli train-mlp [options]\n  rustorch_cli runs-list [options]\n  rustorch_cli runs-summary [options]\n  rustorch_cli runs-export-csv [options]\n  rustorch_cli runs-compare [options]\n  rustorch_cli runs-validate [options]\n  rustorch_cli audit-verify [options]\n\nOPTIONS (shared):\n  --runs-dir <path>        Directory for experiment runs (default: runs)\n  --samples <n>            Number of samples (default: 128)\n  --features <n>           Number of input features (default: 4)\n  --epochs <n>             Training epochs (default: 10)\n  --batch-size <n>         Batch size (default: 16)\n  --lr <f>                 Learning rate (default: 1e-2)\n  --weight-decay <f>       Weight decay (default: 0)\n  --seed <n>               RNG seed (default: 42)\n  --run-name <name>        Run name label\n  --log-every <n>          Log metrics every n steps (default: 10)\n  --checkpoint-every <n>   Save checkpoint every n epochs (default: 1)\n\nOPTIONS (runs-list):\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-summary):\n  --run-id <id>            Run identifier to summarize\n\nOPTIONS (runs-export-csv):\n  --output <path>          Output CSV path (default: runs_summary.csv)\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-compare):\n  --run-ids <csv>          Explicit run IDs to compare\n  --baseline-id <id>       Run ID to use as baseline (default: first in set)\n  --metric-agg <name>      Aggregation: min|max|mean|p50|p95|last (default: last)\n  --top-k <n>              Top deltas to print per run (default: 5)\n  --format <name>          Output format: table|json (default: table)\n  --no-graph               Skip pairwise comparison graph\n  --deterministic-seed <n> Deterministic ordering seed for comparisons\n  --gate-policy <spec>     Regression gate metric:max_pct:max_abs:severity (comma-separated)\n  --gate-allow-missing     Allow missing metrics in regression gate\n  --gate-warn-only         Never fail gate; emit warnings only\n  --tags <csv>             Filter by tag(s) (comma-separated)\n  --status <status>        Filter by status (running/completed/failed)\n\nOPTIONS (runs-validate):\n  --workers <n>             Number of validation workers\n  --schedule-seed <n>       Deterministic scheduler seed for governance validation\n  --quarantine              Move invalid runs into quarantine\n  --quarantine-dir <path>   Quarantine directory override\n  --output <path>           Write JSON report to path\n  --lenient                 Downgrade schema errors to warnings where possible\n  --no-orphaned             Skip orphaned file detection\n  --no-metrics              Skip metrics.jsonl validation\n  --no-telemetry            Skip telemetry.jsonl validation\n  --audit                   Enable governance audit logging\n  --audit-log <path>        Audit log path override\n  --audit-verify            Verify audit log integrity after validation\n  --no-audit-verify         Skip audit log verification\n  --audit-expected-root <h> Expected Merkle root for audit verification\n  --audit-proofs            Include Merkle proofs in audit verification output\n  --audit-proof-samples <n> Max number of audit proofs to include\n  --no-remediation          Skip remediation ticket generation\n\nOPTIONS (audit-verify):\n  --audit-log <path>        Audit log path to verify\n  --expected-root <hash>    Expected Merkle root to verify against\n  --proofs                  Include Merkle proofs in the output\n  --max-proofs <n>          Maximum proofs to include (default: 5)\n  --output <path>           Write JSON report to path\n\nOPTIONS (train-linear):\n  --targets <n>            Number of output targets (default: 1)\n  --noise <f>              Noise stddev for synthetic data (default: 0.05)\n\nOPTIONS (train-mlp):\n  --classes <n>            Number of classes (default: 3)\n  --hidden <n>             Hidden layer size (default: 16)\n  --cluster-std <f>        Cluster stddev for synthetic data (default: 0.35)\n  -h, --help               Print this help text\n"
     );
 }
 
@@ -433,6 +434,11 @@ fn run_runs_compare(args: &[String]) -> Result<()> {
     let top_k = parser.get_usize("top-k")?.unwrap_or(5);
     let format = parser.get("format")?.unwrap_or_else(|| "table".to_string());
     let build_graph = !parser.has_flag("no-graph");
+    let deterministic_seed = parser.get_u64("deterministic-seed")?;
+    let gate_specs = parser.get_csv("gate-policy")?.unwrap_or_default();
+    let gate_allow_missing = parser.has_flag("gate-allow-missing");
+    let gate_warn_only = parser.has_flag("gate-warn-only");
+    let regression_gate = build_regression_gate_config(&gate_specs, gate_allow_missing, gate_warn_only)?;
 
     let config = RunComparisonConfig {
         run_ids,
@@ -441,6 +447,8 @@ fn run_runs_compare(args: &[String]) -> Result<()> {
         metric_aggregation,
         top_k,
         build_graph,
+        deterministic_seed,
+        regression_gate,
     };
 
     let store = ExperimentStore::new(runs_dir)?;
@@ -481,6 +489,81 @@ fn parse_status(value: String) -> Result<Vec<RunStatus>> {
             msg: format!("unknown status {other}"),
         }),
     }
+}
+
+fn build_regression_gate_config(
+    specs: &[String],
+    allow_missing_metrics: bool,
+    warn_only: bool,
+) -> Result<Option<RegressionGateConfig>> {
+    if specs.is_empty() {
+        return Ok(None);
+    }
+    let mut policies = Vec::with_capacity(specs.len());
+    for spec in specs {
+        policies.push(parse_regression_policy(spec)?);
+    }
+    Ok(Some(RegressionGateConfig {
+        policies,
+        allow_missing_metrics,
+        warn_only,
+    }))
+}
+
+fn parse_regression_policy(spec: &str) -> Result<RegressionPolicy> {
+    let parts = spec.split(':').collect::<Vec<&str>>();
+    if parts.len() != 4 {
+        return Err(TorchError::InvalidArgument {
+            op: "cli.runs_compare",
+            msg: format!(
+                "gate-policy expects metric:max_pct:max_abs:severity, got '{spec}'"
+            ),
+        });
+    }
+    let metric = parts[0].trim().to_string();
+    if metric.is_empty() {
+        return Err(TorchError::InvalidArgument {
+            op: "cli.runs_compare",
+            msg: "gate-policy metric cannot be empty".to_string(),
+        });
+    }
+    let max_regression_pct = parse_optional_f32(parts[1], "max_pct")?;
+    let max_regression_abs = parse_optional_f32(parts[2], "max_abs")?;
+    let severity = match parts[3].trim().to_ascii_lowercase().as_str() {
+        "blocker" => RegressionSeverity::Blocker,
+        "major" => RegressionSeverity::Major,
+        "minor" => RegressionSeverity::Minor,
+        other => {
+            return Err(TorchError::InvalidArgument {
+                op: "cli.runs_compare",
+                msg: format!("unknown regression severity '{other}'"),
+            })
+        }
+    };
+    Ok(RegressionPolicy {
+        metric,
+        max_regression_pct,
+        max_regression_abs,
+        severity,
+    })
+}
+
+fn parse_optional_f32(value: &str, label: &str) -> Result<Option<f32>> {
+    let normalized = value.trim();
+    if normalized.is_empty()
+        || normalized.eq_ignore_ascii_case("none")
+        || normalized == "-"
+        || normalized.eq_ignore_ascii_case("null")
+    {
+        return Ok(None);
+    }
+    normalized
+        .parse::<f32>()
+        .map(Some)
+        .map_err(|_| TorchError::InvalidArgument {
+            op: "cli.runs_compare",
+            msg: format!("gate-policy {label} expects f32 or none, got '{value}'"),
+        })
 }
 
 fn print_export_report(report: &CsvExportReport) {
@@ -650,6 +733,19 @@ fn print_compare_report(report: &RunComparisonReport) {
         }
         if !comparison.missing_metrics.is_empty() {
             println!("  - missing: {}", comparison.missing_metrics.join(", "));
+        }
+        if let Some(gate) = &comparison.regression_gate {
+            println!(
+                "  - regression_gate: {:?} ({} findings)",
+                gate.status,
+                gate.findings.len()
+            );
+            for finding in gate.findings.iter().take(3) {
+                println!(
+                    "    - {} ({:?}): {}",
+                    finding.metric, finding.severity, finding.message
+                );
+            }
         }
         println!();
     }

@@ -30,16 +30,18 @@ pub use data::{
 pub use error::{Result, TorchError};
 pub use experiment::{
     ComparisonEdge, CsvExportReport, ExperimentStore, LayoutSummary, MetricAggregation,
-    MetricDelta, MetricStats, MetricsLogger, MetricsLoggerConfig, MetricsSummary,
-    RemediationSeverity, RunComparisonConfig, RunComparisonGraph, RunComparisonReport,
-    RunDeltaReport, RunDeltaSummary, RunFilter, RunGovernanceConfig, RunGovernanceReport,
-    RunGovernanceSummary, RunHandle, RunMetadata, RunOverview, RunRemediationReport,
-    RunRemediationTicket, RunStatus, RunSummary, RunValidationCategory, RunValidationFinding,
-    RunValidationLevel, RunValidationResult, RunValidationStatus, TelemetryStats, TelemetrySummary,
+    DeltaIndex, MetricDelta, MetricStats, MetricsLogger, MetricsLoggerConfig, MetricsSummary,
+    RegressionGateConfig, RegressionGateFinding, RegressionGateReport, RegressionGateStatus,
+    RegressionPolicy, RegressionSeverity, RemediationSeverity, RunComparisonConfig,
+    RunComparisonGraph, RunComparisonReport, RunDeltaReport, RunDeltaSummary, RunFilter,
+    RunGovernanceConfig, RunGovernanceReport, RunGovernanceSummary, RunHandle, RunMetadata,
+    RunOverview, RunRemediationReport, RunRemediationTicket, RunStatus, RunSummary,
+    RunValidationCategory, RunValidationFinding, RunValidationLevel, RunValidationResult,
+    RunValidationStatus, TelemetryStats, TelemetrySummary,
 };
 pub use governance::{
-    build_governance_schedule, DeterministicScheduler, GovernanceSchedule,
-    GovernanceScheduleEntry,
+    build_governance_schedule, deterministic_run_order, DeterministicScheduler,
+    GovernanceSchedule, GovernanceScheduleEntry,
 };
 pub use models::{LinearRegression, MlpClassifier};
 pub use optim::{Optimizer, Sgd};

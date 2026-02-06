@@ -101,6 +101,19 @@ pub fn build_governance_schedule(seed: u64, run_dirs: Vec<PathBuf>) -> Result<Ve
     DeterministicScheduler::new(seed, run_dirs).map(DeterministicScheduler::drain)
 }
 
+pub fn deterministic_run_order(seed: u64, run_ids: &[String]) -> Vec<String> {
+    let mut items = Vec::with_capacity(run_ids.len());
+    for (ordinal, run_id) in run_ids.iter().enumerate() {
+        let priority = hash_priority(seed, run_id);
+        items.push((priority, ordinal, run_id.clone()));
+    }
+    items.sort_by(|a, b| match b.0.cmp(&a.0) {
+        Ordering::Equal => a.1.cmp(&b.1),
+        ordering => ordering,
+    });
+    items.into_iter().map(|(_, _, run_id)| run_id).collect()
+}
+
 fn run_id_from_path(path: &Path) -> Result<String> {
     path.file_name()
         .and_then(|name| name.to_str())

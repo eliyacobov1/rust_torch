@@ -687,6 +687,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "criterion",
+ "libc",
  "log",
  "ndarray",
  "numpy",
