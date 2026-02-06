@@ -50,6 +50,10 @@ harness = false
 name = "bench_run_summary"
 harness = false
 
+[[bench]]
+name = "bench_governance_plan"
+harness = false
+
 [[bin]]
 name = "rustorch_cli"
 path = "src/main.rs"

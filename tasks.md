@@ -1,46 +1,45 @@
-# Principal-Grade Systems Roadmap (v2)
+# Principal-Grade Systems Roadmap (v3)
 
 ## Mission North Star
-Deliver a deterministic ML systems platform with governance-grade replay, experiment intelligence, and performance regression defense that withstands senior/principal scrutiny.
+Ship a deterministic ML governance platform with replayable orchestration, audit-grade integrity, and telemetry-backed regression defense that stands up in senior/principal interviews.
 
 ---
 
 ## Strategic Milestones (Subsystem-Scale)
 
-### 1) Experiment Intelligence Graph Engine (Priority)
-- Delta indexing with baseline-aware provenance stamps.
-- Regression gate policies with auditable findings.
-- Deterministic comparison graphs with seeded ordering.
-- Export-ready reports (JSON/CSV) with schema versioning.
+### 1) Deterministic Governance Execution Engine (Priority)
+- Multi-stage DAG planning with explicit wave/lane ordering.
+- Governance ledger with hash chaining + replay cursors.
+- Exportable governance plans + replay manifests.
 
-### 2) Deterministic Governance Replay
-- Replayable governance schedules with audit log anchoring.
-- Quarantine and remediation automation with immutable lineage.
-- Replay CLI tooling with schedule manifests.
+### 2) Experiment Intelligence Graph Engine
+- Provenance-aware delta index with deterministic comparisons.
+- Regression gates with auditable findings + remediation tickets.
+- Comparison graph export with schema versioning.
 
-### 3) Telemetry & Performance Defense
-- Telemetry budgets with pass/fail thresholds.
-- Benchmarks outputting wall time + memory delta for analytics and audit verification.
-- Export pipelines for continuous regression monitoring.
+### 3) Telemetry + Performance Defense
+- Enforceable telemetry budgets (mean/p95/max/volume).
+- Performance scripts emitting wall time + memory delta.
+- Telemetry budget regression thresholds integrated into governance validation.
 
 ### 4) Training Orchestration Suite
-- Multi-stage train/eval/promote pipelines.
-- Signed artifact manifests with verification hooks.
-- Deterministic replay for training and validation workflows.
+- Governance-backed training stages (init/epoch/checkpoint/finalize).
+- Signed artifacts + verification hooks for checkpoints.
+- Replayable training manifests with audit anchoring.
 
 ---
 
 ## Risk Register (Active)
-- Missing deterministic replay mode for analytics and validation.
-- Telemetry thresholds not enforced in CI or governance validation.
-- Limited provenance capture across experiment comparisons.
+- Missing signed artifact verification for training checkpoints.
+- Governance ledger not yet wired into external CLI workflows.
+- Telemetry budget enforcement not yet integrated into CI pipelines.
 
 ---
 
 ## Readiness Gates
-- [x] Deterministic scheduling ledger for governance validation.
-- [x] Audit verification with Merkle proof sampling.
-- [x] Regression gate reports for experiment comparisons.
-- [ ] Replayable governance validation CLI.
-- [ ] Telemetry export with enforced budgets.
-- [ ] Signed artifact manifests in training orchestration.
+- [x] Deterministic governance planner with DAG + wave/lane ordering.
+- [x] Governance ledger with hash chaining for replay.
+- [x] Telemetry budget structure and evaluation.
+- [ ] Governance CLI to replay and validate plans across stores.
+- [ ] Signed artifacts + verification for training checkpoints.
+- [ ] CI gate enforcing telemetry budgets + performance deltas.
