@@ -15,11 +15,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::audit::{
-    record_governance_plan, verify_audit_log, AuditEvent, AuditLog, AuditScope, AuditStatus,
-    AuditVerificationConfig, AuditVerificationReport,
+    execution_plan_digest, governance_plan_digest, record_execution_plan, record_governance_plan,
+    verify_audit_log, AuditEvent, AuditLog, AuditScope, AuditStatus, AuditVerificationConfig,
+    AuditVerificationReport,
 };
 use crate::checkpoint::{save_state_dict, StateDict};
 use crate::error::{Result, TorchError};
+use crate::execution::{ExecutionCostProfile, ExecutionGraph, ExecutionPlanner};
 use crate::governance::{
     build_governance_schedule, deterministic_run_order, GovernanceGraph, GovernanceLedger,
     GovernancePlan, GovernancePlanner, GovernanceScheduleEntry,
@@ -429,6 +431,10 @@ pub struct RunGovernanceReport {
     pub audit_log_path: Option<PathBuf>,
     pub audit_merkle_root: Option<String>,
     pub audit_verification: Option<AuditVerificationReport>,
+    pub governance_plan_hash: String,
+    pub governance_plan_root: Option<String>,
+    pub execution_plan_hash: String,
+    pub execution_plan_root: Option<String>,
     pub schedule_seed: u64,
     pub schedule_entries: Vec<GovernanceScheduleEntry>,
     pub summary: RunGovernanceSummary,
@@ -829,21 +835,29 @@ impl ExperimentStore {
             .unwrap_or_else(|| derive_schedule_seed(&run_dirs));
         let schedule_entries = build_governance_schedule(schedule_seed, run_dirs.clone())?;
         let governance_plan = build_validation_plan(schedule_seed, &schedule_entries)?;
+        let scheduled_dirs = schedule_entries
+            .iter()
+            .map(|entry| entry.run_dir.clone())
+            .collect::<Vec<PathBuf>>();
+        let total_runs = scheduled_dirs.len();
+        let worker_count = config.max_workers.max(1).min(total_runs.max(1));
+        let execution_plan =
+            build_validation_execution_plan(schedule_seed, &governance_plan, worker_count)?;
+        let governance_digest = governance_plan_digest(&governance_plan)?;
+        let execution_digest = execution_plan_digest(&execution_plan)?;
         if let Some(audit_log) = audit_log.as_ref() {
             match audit_log.lock() {
                 Ok(mut guard) => {
                     if let Err(err) = record_governance_plan(&mut guard, &governance_plan) {
                         warn!("failed to record governance plan: {err}");
                     }
+                    if let Err(err) = record_execution_plan(&mut guard, &execution_plan) {
+                        warn!("failed to record execution plan: {err}");
+                    }
                 }
-                Err(_) => warn!("audit log lock poisoned while recording governance plan"),
+                Err(_) => warn!("audit log lock poisoned while recording plans"),
             }
         }
-        let scheduled_dirs = schedule_entries
-            .iter()
-            .map(|entry| entry.run_dir.clone())
-            .collect::<Vec<PathBuf>>();
-        let total_runs = scheduled_dirs.len();
         if total_runs == 0 {
             if let Err(err) = record_audit_event(
                 &audit_log,
@@ -866,6 +880,10 @@ impl ExperimentStore {
                 audit_log_path,
                 audit_merkle_root,
                 audit_verification,
+                governance_plan_hash: governance_digest.plan_hash,
+                governance_plan_root: governance_digest.entries_root,
+                execution_plan_hash: execution_digest.plan_hash,
+                execution_plan_root: execution_digest.entries_root,
                 schedule_seed,
                 schedule_entries: Vec::new(),
                 summary: RunGovernanceSummary {
@@ -880,7 +898,6 @@ impl ExperimentStore {
             });
         }
 
-        let worker_count = config.max_workers.max(1).min(total_runs.max(1));
         let graph = build_validation_graph(config)?;
         let mut receiver = spawn_validation_workers(
             worker_count,
@@ -970,6 +987,10 @@ impl ExperimentStore {
             audit_log_path,
             audit_merkle_root,
             audit_verification,
+            governance_plan_hash: governance_digest.plan_hash,
+            governance_plan_root: governance_digest.entries_root,
+            execution_plan_hash: execution_digest.plan_hash,
+            execution_plan_root: execution_digest.entries_root,
             schedule_seed,
             schedule_entries,
             summary: RunGovernanceSummary {
@@ -2489,6 +2510,18 @@ fn build_validation_plan(
         previous = Some(stage_id);
     }
     GovernancePlanner::new(seed, graph).plan()
+}
+
+fn build_validation_execution_plan(
+    seed: u64,
+    governance_plan: &GovernancePlan,
+    max_lanes: usize,
+) -> Result<crate::execution::ExecutionPlan> {
+    let graph =
+        ExecutionGraph::from_governance_plan(governance_plan, ExecutionCostProfile::default())?;
+    ExecutionPlanner::new(seed, graph)
+        .with_max_lanes(max_lanes)
+        .plan()
 }
 
 fn remediation_severity(result: &RunValidationResult) -> RemediationSeverity {

@@ -587,6 +587,19 @@ fn print_governance_report(report: &RunGovernanceReport) {
         report.summary.quarantined_runs,
         report.summary.warning_count
     );
+    println!(
+        "governance plan: hash={}, entries_root={}",
+        report.governance_plan_hash,
+        report
+            .governance_plan_root
+            .as_deref()
+            .unwrap_or("n/a")
+    );
+    println!(
+        "execution plan: hash={}, entries_root={}",
+        report.execution_plan_hash,
+        report.execution_plan_root.as_deref().unwrap_or("n/a")
+    );
     if let Some(path) = &report.audit_log_path {
         let root = report.audit_merkle_root.as_deref().unwrap_or("n/a");
         println!("audit log: {} (merkle_root={})", path.display(), root);
