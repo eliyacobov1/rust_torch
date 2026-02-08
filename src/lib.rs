@@ -19,10 +19,10 @@ pub mod training;
 pub mod py;
 
 pub use audit::{
-    record_execution_plan, record_governance_plan, verify_audit_log, AuditChainIssue,
-    AuditChainIssueKind, AuditEvent, AuditLog, AuditProof, AuditProofDirection, AuditScope,
-    AuditStatus, AuditVerificationConfig, AuditVerificationReport, AuditVerificationStatus,
-    MerkleAccumulator,
+    execution_plan_digest, governance_plan_digest, record_execution_plan, record_governance_plan,
+    verify_audit_log, AuditChainIssue, AuditChainIssueKind, AuditEvent, AuditLog, AuditProof,
+    AuditProofDirection, AuditScope, AuditStatus, AuditVerificationConfig, AuditVerificationReport,
+    AuditVerificationStatus, MerkleAccumulator, PlanDigest,
 };
 pub use checkpoint::{load_state_dict, save_state_dict, StateDict};
 pub use data::{

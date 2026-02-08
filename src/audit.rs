@@ -213,12 +213,21 @@ impl AuditLog {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanDigest {
+    pub plan_hash: String,
+    pub entries_root: Option<String>,
+    pub entries: usize,
+}
+
 #[derive(Debug, Serialize)]
 struct GovernancePlanAuditPayload<'a> {
     seed: u64,
     generated_at_unix: u64,
     total_waves: usize,
     total_stages: usize,
+    plan_hash: String,
+    entries_root: Option<String>,
     entries: Vec<GovernancePlanAuditEntry<'a>>,
 }
 
@@ -232,6 +241,7 @@ struct GovernancePlanAuditEntry<'a> {
 }
 
 pub fn record_governance_plan(audit_log: &mut AuditLog, plan: &GovernancePlan) -> Result<AuditEvent> {
+    let digest = governance_plan_digest(plan)?;
     let entries = plan
         .entries
         .iter()
@@ -248,6 +258,8 @@ pub fn record_governance_plan(audit_log: &mut AuditLog, plan: &GovernancePlan) -
         generated_at_unix: plan.generated_at_unix,
         total_waves: plan.total_waves,
         total_stages: plan.total_stages,
+        plan_hash: digest.plan_hash,
+        entries_root: digest.entries_root,
         entries,
     };
     let message = serde_json::to_string(&payload).map_err(|err| TorchError::Experiment {
@@ -271,6 +283,8 @@ struct ExecutionPlanAuditPayload<'a> {
     total_lanes: usize,
     total_stages: usize,
     makespan_ticks: u64,
+    plan_hash: String,
+    entries_root: Option<String>,
     entries: Vec<ExecutionPlanAuditEntry<'a>>,
 }
 
@@ -286,6 +300,7 @@ struct ExecutionPlanAuditEntry<'a> {
 }
 
 pub fn record_execution_plan(audit_log: &mut AuditLog, plan: &ExecutionPlan) -> Result<AuditEvent> {
+    let digest = execution_plan_digest(plan)?;
     let entries = plan
         .entries
         .iter()
@@ -305,6 +320,8 @@ pub fn record_execution_plan(audit_log: &mut AuditLog, plan: &ExecutionPlan) -> 
         total_lanes: plan.total_lanes,
         total_stages: plan.total_stages,
         makespan_ticks: plan.makespan_ticks,
+        plan_hash: digest.plan_hash,
+        entries_root: digest.entries_root,
         entries,
     };
     let message = serde_json::to_string(&payload).map_err(|err| TorchError::Experiment {
@@ -319,6 +336,122 @@ pub fn record_execution_plan(audit_log: &mut AuditLog, plan: &ExecutionPlan) -> 
         message,
         0,
     ))
+}
+
+#[derive(Debug, Serialize)]
+struct GovernancePlanHashPayload<'a> {
+    seed: u64,
+    total_waves: usize,
+    total_stages: usize,
+    entries: Vec<GovernancePlanHashEntry<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct GovernancePlanHashEntry<'a> {
+    stage_id: &'a str,
+    run_id: &'a str,
+    stage: &'a str,
+    priority: u64,
+    ordinal: usize,
+    wave: usize,
+    lane: usize,
+    dependencies: &'a [String],
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutionPlanHashPayload<'a> {
+    seed: u64,
+    total_lanes: usize,
+    total_stages: usize,
+    makespan_ticks: u64,
+    entries: Vec<ExecutionPlanHashEntry<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutionPlanHashEntry<'a> {
+    stage_id: &'a str,
+    run_id: &'a str,
+    stage: &'a str,
+    dependencies: &'a [String],
+    priority: u64,
+    ordinal: usize,
+    lane: usize,
+    start_tick: u64,
+    end_tick: u64,
+    cost: u64,
+}
+
+pub fn governance_plan_digest(plan: &GovernancePlan) -> Result<PlanDigest> {
+    let mut merkle = MerkleAccumulator::new();
+    let entries = plan
+        .entries
+        .iter()
+        .map(|entry| {
+            let entry_payload = GovernancePlanHashEntry {
+                stage_id: entry.stage_id.as_str(),
+                run_id: entry.run_id.as_str(),
+                stage: entry.stage.as_str(),
+                priority: entry.priority,
+                ordinal: entry.ordinal,
+                wave: entry.wave,
+                lane: entry.lane,
+                dependencies: entry.dependencies.as_slice(),
+            };
+            let entry_hash = hash_plan_payload(&entry_payload, "audit.governance_plan_entry")?;
+            merkle.append(entry_hash);
+            Ok(entry_payload)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let payload = GovernancePlanHashPayload {
+        seed: plan.seed,
+        total_waves: plan.total_waves,
+        total_stages: plan.total_stages,
+        entries,
+    };
+    let hash = hash_plan_payload(&payload, "audit.governance_plan")?;
+    Ok(PlanDigest {
+        plan_hash: hash.to_hex().to_string(),
+        entries_root: merkle.root_hex(),
+        entries: plan.entries.len(),
+    })
+}
+
+pub fn execution_plan_digest(plan: &ExecutionPlan) -> Result<PlanDigest> {
+    let mut merkle = MerkleAccumulator::new();
+    let entries = plan
+        .entries
+        .iter()
+        .map(|entry| {
+            let entry_payload = ExecutionPlanHashEntry {
+                stage_id: entry.stage_id.as_str(),
+                run_id: entry.run_id.as_str(),
+                stage: entry.stage.as_str(),
+                dependencies: entry.dependencies.as_slice(),
+                priority: entry.priority,
+                ordinal: entry.ordinal,
+                lane: entry.lane,
+                start_tick: entry.start_tick,
+                end_tick: entry.end_tick,
+                cost: entry.cost,
+            };
+            let entry_hash = hash_plan_payload(&entry_payload, "audit.execution_plan_entry")?;
+            merkle.append(entry_hash);
+            Ok(entry_payload)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let payload = ExecutionPlanHashPayload {
+        seed: plan.seed,
+        total_lanes: plan.total_lanes,
+        total_stages: plan.total_stages,
+        makespan_ticks: plan.makespan_ticks,
+        entries,
+    };
+    let hash = hash_plan_payload(&payload, "audit.execution_plan")?;
+    Ok(PlanDigest {
+        plan_hash: hash.to_hex().to_string(),
+        entries_root: merkle.root_hex(),
+        entries: plan.entries.len(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -688,6 +821,16 @@ fn hash_event(event: &AuditEvent) -> Result<Hash> {
     let serialized = serde_json::to_vec(&payload).map_err(|err| TorchError::Experiment {
         op: "audit_log.hash_event",
         msg: format!("failed to serialize audit payload: {err}"),
+    })?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&serialized);
+    Ok(hasher.finalize())
+}
+
+fn hash_plan_payload<T: Serialize>(payload: &T, op: &'static str) -> Result<Hash> {
+    let serialized = serde_json::to_vec(payload).map_err(|err| TorchError::Experiment {
+        op,
+        msg: format!("failed to serialize plan payload: {err}"),
     })?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(&serialized);

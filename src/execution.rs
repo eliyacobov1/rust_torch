@@ -10,7 +10,7 @@ use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, TorchError};
-use crate::governance::GovernanceGraph;
+use crate::governance::{GovernanceGraph, GovernancePlan};
 use crate::telemetry::{TelemetryEvent, TelemetryRecorder, TelemetrySink};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +72,24 @@ impl ExecutionGraph {
                 stage.run_id.clone(),
                 stage.stage.clone(),
                 stage.dependencies.iter().cloned().collect(),
+                cost,
+            )?;
+        }
+        Ok(graph)
+    }
+
+    pub fn from_governance_plan(
+        plan: &GovernancePlan,
+        cost_profile: ExecutionCostProfile,
+    ) -> Result<Self> {
+        let mut graph = Self::new();
+        for entry in &plan.entries {
+            let cost = cost_profile.cost_for(&entry.stage_id);
+            graph.add_stage_with_id(
+                entry.stage_id.clone(),
+                entry.run_id.clone(),
+                entry.stage.clone(),
+                entry.dependencies.clone(),
                 cost,
             )?;
         }
