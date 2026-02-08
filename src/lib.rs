@@ -43,9 +43,12 @@ pub use experiment::{
 };
 pub use execution::{
     ExecutionAction, ExecutionCostProfile, ExecutionEngine, ExecutionGraph, ExecutionLedger,
-    ExecutionLedgerEvent, ExecutionPlan, ExecutionPlanEntry, ExecutionPlanner, ExecutionRegistry,
-    ExecutionRunReport, ExecutionRunStatus, ExecutionStage, ExecutionStageReport, ExecutionStatus,
-    ExecutionTask,
+    ExecutionLedgerEvent, ExecutionLedgerIssue, ExecutionLedgerIssueKind,
+    ExecutionLedgerVerificationConfig, ExecutionLedgerVerificationReport,
+    ExecutionLedgerVerificationStatus, ExecutionPlan, ExecutionPlanEntry, ExecutionPlanner,
+    ExecutionRegistry, ExecutionReplayCursor, ExecutionRunReport, ExecutionRunStatus,
+    ExecutionStage, ExecutionStageReport, ExecutionStatus, ExecutionTask,
+    verify_execution_ledger,
 };
 pub use governance::{
     build_governance_schedule, deterministic_run_order, DeterministicScheduler,

@@ -1,14 +1,18 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
-use std::io::{BufRead, Write};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use blake3::Hash;
 use log::{info, warn};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::audit::MerkleAccumulator;
 use crate::error::{Result, TorchError};
 use crate::governance::{GovernanceGraph, GovernancePlan};
 use crate::telemetry::{TelemetryEvent, TelemetryRecorder, TelemetrySink};
@@ -457,6 +461,326 @@ impl ExecutionLedger {
 
     pub fn path(&self) -> &std::path::Path {
         &self.path
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExecutionLedgerVerificationStatus {
+    Valid,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExecutionLedgerIssueKind {
+    ParseError,
+    IndexMismatch,
+    PrevHashMismatch,
+    HashMismatch,
+    HashDecodeFailure,
+    ExpectedRootMismatch,
+    ReplayMismatch,
+    ReplayOrderingError,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionLedgerIssue {
+    pub line: usize,
+    pub index: Option<u64>,
+    pub kind: ExecutionLedgerIssueKind,
+    pub message: String,
+    pub expected: Option<String>,
+    pub actual: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionLedgerVerificationReport {
+    pub status: ExecutionLedgerVerificationStatus,
+    pub total_events: usize,
+    pub issues: Vec<ExecutionLedgerIssue>,
+    pub merkle_root: Option<String>,
+    pub expected_root: Option<String>,
+    pub matches_expected_root: Option<bool>,
+    pub duration_ms: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutionLedgerVerificationConfig {
+    pub verify_hashes: bool,
+    pub verify_merkle: bool,
+    pub expected_root: Option<String>,
+}
+
+impl Default for ExecutionLedgerVerificationConfig {
+    fn default() -> Self {
+        Self {
+            verify_hashes: true,
+            verify_merkle: true,
+            expected_root: None,
+        }
+    }
+}
+
+pub fn verify_execution_ledger(
+    path: impl AsRef<Path>,
+    config: &ExecutionLedgerVerificationConfig,
+) -> Result<ExecutionLedgerVerificationReport> {
+    let start = Instant::now();
+    let path = path.as_ref();
+    let file = File::open(path).map_err(|err| TorchError::Experiment {
+        op: "execution_ledger.verify",
+        msg: format!("failed to open ledger {}: {err}", path.display()),
+    })?;
+    let reader = BufReader::new(file);
+    let mut events = Vec::new();
+    let mut issues = Vec::new();
+
+    for (line_idx, line) in reader.lines().enumerate() {
+        let line = line.map_err(|err| TorchError::Experiment {
+            op: "execution_ledger.verify",
+            msg: format!("failed to read ledger {}: {err}", path.display()),
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<ExecutionLedgerEvent>(&line) {
+            Ok(event) => events.push(event),
+            Err(err) => issues.push(ExecutionLedgerIssue {
+                line: line_idx + 1,
+                index: None,
+                kind: ExecutionLedgerIssueKind::ParseError,
+                message: format!("failed to parse execution ledger event: {err}"),
+                expected: None,
+                actual: None,
+            }),
+        }
+    }
+
+    if config.verify_hashes {
+        let computed = events
+            .par_iter()
+            .map(|event| (event.index, event.hash.clone(), hash_ledger_event(event)))
+            .collect::<Vec<(u64, String, Result<Hash>)>>();
+        for (idx, stored_hash, hash_result) in computed {
+            match hash_result {
+                Ok(hash) => {
+                    let expected = hash.to_hex().to_string();
+                    if stored_hash != expected {
+                        issues.push(ExecutionLedgerIssue {
+                            line: (idx + 1) as usize,
+                            index: Some(idx),
+                            kind: ExecutionLedgerIssueKind::HashMismatch,
+                            message: "execution ledger hash mismatch".to_string(),
+                            expected: Some(expected),
+                            actual: Some(stored_hash),
+                        });
+                    }
+                }
+                Err(err) => issues.push(ExecutionLedgerIssue {
+                    line: (idx + 1) as usize,
+                    index: Some(idx),
+                    kind: ExecutionLedgerIssueKind::HashMismatch,
+                    message: format!("failed to recompute ledger hash: {err}"),
+                    expected: None,
+                    actual: None,
+                }),
+            }
+        }
+    }
+
+    let mut expected_index = 0_u64;
+    let mut prev_hash: Option<String> = None;
+    let mut accumulator = MerkleAccumulator::new();
+
+    for event in &events {
+        if event.index != expected_index {
+            issues.push(ExecutionLedgerIssue {
+                line: (event.index + 1) as usize,
+                index: Some(event.index),
+                kind: ExecutionLedgerIssueKind::IndexMismatch,
+                message: "execution ledger index mismatch".to_string(),
+                expected: Some(expected_index.to_string()),
+                actual: Some(event.index.to_string()),
+            });
+            expected_index = event.index.saturating_add(1);
+        } else {
+            expected_index = expected_index.saturating_add(1);
+        }
+
+        if event.prev_hash != prev_hash {
+            issues.push(ExecutionLedgerIssue {
+                line: (event.index + 1) as usize,
+                index: Some(event.index),
+                kind: ExecutionLedgerIssueKind::PrevHashMismatch,
+                message: "previous hash mismatch".to_string(),
+                expected: prev_hash.clone(),
+                actual: event.prev_hash.clone(),
+            });
+        }
+        prev_hash = Some(event.hash.clone());
+
+        match Hash::from_hex(&event.hash) {
+            Ok(hash) => accumulator.append(hash),
+            Err(err) => issues.push(ExecutionLedgerIssue {
+                line: (event.index + 1) as usize,
+                index: Some(event.index),
+                kind: ExecutionLedgerIssueKind::HashDecodeFailure,
+                message: format!("failed to decode ledger hash: {err}"),
+                expected: None,
+                actual: Some(event.hash.clone()),
+            }),
+        }
+    }
+
+    let merkle_root = if config.verify_merkle || config.expected_root.is_some() {
+        accumulator.root_hex()
+    } else {
+        None
+    };
+    let mut matches_expected_root = None;
+    if let Some(expected) = &config.expected_root {
+        let matches = merkle_root.as_deref() == Some(expected.as_str());
+        matches_expected_root = Some(matches);
+        if !matches {
+            issues.push(ExecutionLedgerIssue {
+                line: 0,
+                index: None,
+                kind: ExecutionLedgerIssueKind::ExpectedRootMismatch,
+                message: "execution ledger merkle root mismatch".to_string(),
+                expected: Some(expected.clone()),
+                actual: merkle_root.clone(),
+            });
+        }
+    }
+
+    let status = if issues.is_empty() {
+        ExecutionLedgerVerificationStatus::Valid
+    } else {
+        ExecutionLedgerVerificationStatus::Invalid
+    };
+
+    Ok(ExecutionLedgerVerificationReport {
+        status,
+        total_events: events.len(),
+        issues,
+        merkle_root,
+        expected_root: config.expected_root.clone(),
+        matches_expected_root,
+        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutionReplayCursor {
+    entries: Vec<ExecutionPlanEntry>,
+    position: usize,
+    inflight: Option<ExecutionPlanEntry>,
+}
+
+impl ExecutionReplayCursor {
+    pub fn new(plan: ExecutionPlan) -> Self {
+        Self {
+            entries: plan.entries,
+            position: 0,
+            inflight: None,
+        }
+    }
+
+    pub fn expect_event(&mut self, event: &ExecutionLedgerEvent) -> Result<ExecutionPlanEntry> {
+        match event.action {
+            ExecutionAction::Started => self.expect_start(event),
+            ExecutionAction::Completed | ExecutionAction::Failed => self.expect_completion(event),
+        }
+    }
+
+    fn expect_start(&mut self, event: &ExecutionLedgerEvent) -> Result<ExecutionPlanEntry> {
+        if let Some(inflight) = &self.inflight {
+            return Err(TorchError::Experiment {
+                op: "execution.replay",
+                msg: format!(
+                    "received start for {} while {} is still inflight",
+                    event.stage_id, inflight.stage_id
+                ),
+            });
+        }
+        let Some(entry) = self.entries.get(self.position) else {
+            return Err(TorchError::Experiment {
+                op: "execution.replay",
+                msg: format!(
+                    "expected no more stages but saw {} at position {}",
+                    event.stage_id, self.position
+                ),
+            });
+        };
+        if entry.stage_id != event.stage_id {
+            return Err(TorchError::Experiment {
+                op: "execution.replay",
+                msg: format!(
+                    "deterministic plan mismatch: expected {}, got {}",
+                    entry.stage_id, event.stage_id
+                ),
+            });
+        }
+        if entry.run_id != event.run_id
+            || entry.stage != event.stage
+            || entry.lane != event.lane
+            || entry.start_tick != event.start_tick
+            || entry.end_tick != event.end_tick
+        {
+            return Err(TorchError::Experiment {
+                op: "execution.replay",
+                msg: format!(
+                    "execution ledger event mismatch for stage {} (lane/ticks/run metadata)",
+                    event.stage_id
+                ),
+            });
+        }
+        self.inflight = Some(entry.clone());
+        Ok(entry.clone())
+    }
+
+    fn expect_completion(&mut self, event: &ExecutionLedgerEvent) -> Result<ExecutionPlanEntry> {
+        let Some(inflight) = &self.inflight else {
+            return Err(TorchError::Experiment {
+                op: "execution.replay",
+                msg: format!(
+                    "received completion for {} without a started stage",
+                    event.stage_id
+                ),
+            });
+        };
+        if inflight.stage_id != event.stage_id {
+            return Err(TorchError::Experiment {
+                op: "execution.replay",
+                msg: format!(
+                    "completion mismatch: expected {}, got {}",
+                    inflight.stage_id, event.stage_id
+                ),
+            });
+        }
+        if inflight.lane != event.lane
+            || inflight.start_tick != event.start_tick
+            || inflight.end_tick != event.end_tick
+        {
+            return Err(TorchError::Experiment {
+                op: "execution.replay",
+                msg: format!(
+                    "completion metadata mismatch for stage {}",
+                    event.stage_id
+                ),
+            });
+        }
+        let entry = inflight.clone();
+        self.inflight = None;
+        self.position = self.position.saturating_add(1);
+        Ok(entry)
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.entries.len().saturating_sub(self.position)
+    }
+
+    pub fn has_inflight(&self) -> bool {
+        self.inflight.is_some()
     }
 }
 

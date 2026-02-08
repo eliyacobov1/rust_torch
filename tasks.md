@@ -10,7 +10,7 @@ Deliver an end-to-end deterministic ML governance platform with audit-grade repl
 
 **Execution tasks (in order):**
 1. ✅ **Execution plan audit anchoring** — record execution plans into the audit log alongside governance plans and expose plan hashes/roots in run validation output. **(Complete)**
-2. **Execution ledger verification** — add a verifier for execution ledgers (hash-chain checks + optional Merkle root) and a replay cursor that validates stage ordering against the recorded plan.
+2. ✅ **Execution ledger verification** — add a verifier for execution ledgers (hash-chain checks + optional Merkle root) and a replay cursor that validates stage ordering against the recorded plan. **(Complete)**
 3. **Replay CLI & manifests** — add CLI commands to emit deterministic replay manifests and validate governance + execution plan parity against ledgers.
 4. **Determinism test suite** — integration tests that assert identical schedule/plan outputs across seeds, plus replay verification for a recorded run.
 
