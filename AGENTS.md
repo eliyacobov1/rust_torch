@@ -46,3 +46,12 @@ Deliver a **governance-first, deterministic ML systems platform** with replayabl
 - Commit messages: short, imperative, specific (e.g., "Add execution replay ledger").
 - PRs must include: summary, key changes, and test commands.
 - Note API changes explicitly and link related issues if applicable.
+
+## Definition of Done (Senior Interview Ready)
+1. **Deterministic replay proof**: governance schedule + execution plans are recorded, hash-chained, and replay-verified end-to-end with deterministic ordering guarantees.
+2. **Audit-grade integrity**: audit logs emit Merkle roots, verification reports, and tamper-evident proofs for governance, execution, and regression findings.
+3. **Regression defense**: comparison graphs + delta indices are persisted with schema versions; regression gates are enforced (warn/fail) and logged.
+4. **Telemetry + perf gates**: telemetry budgets are enforced in CI; all performance scripts emit wall time + memory delta with consistent formatting.
+5. **Artifact integrity & replay**: checkpoints are signed/verified; training emits replay manifests with seed + artifact digests; replay tooling validates them.
+6. **Complexity/perf evidence**: benchmarks cover critical kernels (broadcast, matmul, batch iterators) and report deterministic results with measured deltas.
+7. **Resilience + testing**: integration/stress tests validate deterministic scheduling, ledger verification, and regression gate enforcement under load.
