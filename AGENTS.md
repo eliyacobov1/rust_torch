@@ -57,4 +57,4 @@ Deliver a **governance-first, deterministic ML systems platform** with replayabl
 7. **Resilience + testing**: integration/stress tests validate deterministic scheduling, ledger verification, and regression gate enforcement under load.
 
 ## Project Readiness
-Status: In progress — Sprint 1 Task 1 (Execution plan audit anchoring) complete; remaining roadmap tasks pending.
+Status: In progress — Sprint 1 Task 2 (Execution ledger verification) complete; remaining roadmap tasks pending.
